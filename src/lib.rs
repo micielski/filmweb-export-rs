@@ -16,7 +16,7 @@ impl fmt::Display for FwErrors {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub enum FwPageType {
     Films,
     Serials,
@@ -46,7 +46,6 @@ pub struct FwApiDetails {
     timestamp: u128,
 }
 
-#[derive(Debug)]
 pub struct FwRatedTitle {
     title_id: u32,
     pub title_pl: String,
@@ -109,10 +108,7 @@ impl FwPage {
             let title_id = votebox.select(&Selector::parse(".previewFilm").unwrap()).next().unwrap().value().attr("data-film-id").unwrap();
             let year = votebox.select(&Selector::parse(".preview__year").unwrap()).next().unwrap().inner_html();
             let title_pl = votebox.select(&Selector::parse(".preview__link").unwrap()).next().unwrap().inner_html();
-            let title = match votebox.select(&Selector::parse(".preview__originalTitle").unwrap()).next() {
-                Some(element) => Some(element.inner_html()),
-                None => None,
-            };
+            let title = votebox.select(&Selector::parse(".preview__originalTitle").unwrap()).next().map(|element| element.inner_html());
 
             // async closures, when?
             let api_response = match self.page_type {
@@ -231,7 +227,7 @@ impl FwRatedTitle {
         };
 
         let imdb_id = match self.imdb_id {
-            Some(id) => id.to_string(),
+            Some(id) => id,
             None => "not-found".to_string(),
         };
 
@@ -293,5 +289,11 @@ impl ExportFiles {
             want2see,
             favorited,
         }
+    }
+}
+
+impl Default for ExportFiles {
+    fn default() -> Self {
+        Self::new()
     }
 }
