@@ -216,20 +216,14 @@ impl FwRatedTitle {
     }
 
     pub fn export_csv(self, files: &mut ExportFiles) {
-        let title = match self.title {
-            Some(title) => title,
-            None => self.title_pl,
-        };
-
+        let title = self.title.unwrap_or(self.title_pl);
+        
         let rating = match self.rating {
             Some(ref rating) => rating.rate.to_string(),
             None => "no-vote".to_string(),
         };
 
-        let imdb_id = match self.imdb_id {
-            Some(id) => id,
-            None => "not-found".to_string(),
-        };
+        let imdb_id = self.imdb_id.unwrap_or("not-found".to_string());
 
         let write_title = |file: &mut Writer<File>| {
             file.write_record(&[imdb_id.as_ref(), rating.as_ref(), "", title.as_ref(), "", "", "", "", "", self.year.to_string().as_ref(), "", "", ""]).unwrap();
