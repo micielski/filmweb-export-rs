@@ -1,10 +1,9 @@
 use clap::Parser;
-use colored::{Colorize, ColoredString};
+use colored::{ColoredString, Colorize};
 use reqwest::Client;
 use std::{error::Error, io, io::Write};
 
 use filmweb_export_rs::*;
-
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -48,16 +47,16 @@ async fn export(args: Args) -> Result<(), Box<dyn Error>> {
         wants2see: Vec::new(),
     };
 
-    // AWAIT IS ONLY ALLOWED INSIDE ASYNC FUNCTIONS AND BLOCKS AWAIT IS ONLY ALLOWED INSIDE ASYNC FUNCTIONS AND BLOCKS AWAIT IS ONLY ALLOWED INSIDE ASYNC FUNCTIONS AND BLOCKS 
+    // AWAIT IS ONLY ALLOWED INSIDE ASYNC FUNCTIONS AND BLOCKS AWAIT IS ONLY ALLOWED INSIDE ASYNC FUNCTIONS AND BLOCKS AWAIT IS ONLY ALLOWED INSIDE ASYNC FUNCTIONS AND BLOCKS
     // (1..=counts.0/25+1).into_iter().map(|i| fetch_page(&user, i, FwPageType::Films, &fw_client, &mut pages).await);
-    let films_pages = (counts.0 as f64/25_f64 +1_f64.ceil()) as u16;
-    let serials_pages = (counts.1 as f64/25_f64 +1_f64.ceil()) as u16;
-    let wants2see_pages = (counts.2 as f64/25_f64 +1_f64.ceil()) as u16;
+    let films_pages = (counts.0 as f64 / 25_f64 + 1_f64.ceil()) as u16;
+    let serials_pages = (counts.1 as f64 / 25_f64 + 1_f64.ceil()) as u16;
+    let wants2see_pages = (counts.2 as f64 / 25_f64 + 1_f64.ceil()) as u16;
     print!("\r{} Scraping films...", "[i]".blue());
     for i in 1..=films_pages {
-      fetch_page(&user, i, FwPageType::Films, &fw_client, &mut pages).await;
-      print!("\r{} Scraping films... [{}/{}]", "[i]".blue(), i, films_pages);
-      io::stdout().flush().unwrap();
+        fetch_page(&user, i, FwPageType::Films, &fw_client, &mut pages).await;
+        print!("\r{} Scraping films... [{}/{}]", "[i]".blue(), i, films_pages);
+        io::stdout().flush().unwrap();
     }
 
     print!("\r{} Scraping serials...", "[i]".blue());
@@ -70,7 +69,11 @@ async fn export(args: Args) -> Result<(), Box<dyn Error>> {
     print!("\r{} Scraping wants2see...", "[i]".blue());
     for i in 1..=wants2see_pages {
         fetch_page(&user, i, FwPageType::WantsToSee, &fw_client, &mut pages).await;
-        if i != wants2see_pages { print!("\r{} Scraping wants2see... [{}/{}]", "[i]".blue(), i, wants2see_pages); } else { println!("\r{} Scraping wants2see... [{}/{}]", "[i]".blue(), i, wants2see_pages); }
+        if i != wants2see_pages {
+            print!("\r{} Scraping wants2see... [{}/{}]", "[i]".blue(), i, wants2see_pages);
+        } else {
+            println!("\r{} Scraping wants2see... [{}/{}]", "[i]".blue(), i, wants2see_pages);
+        }
         io::stdout().flush().unwrap();
     }
 
@@ -99,11 +102,22 @@ async fn imdb_id_and_export(pages: Vec<FwPage>, imdb_client: &Client, export_fil
 
 fn print_title(title: &FwRatedTitle) {
     match &title.imdb_id {
-        Some(id) => println!("{} {} {} {}{}", "[+]".green(), title.title_pl, print_rating(&title.rating.as_ref()), "|".dimmed(), id.dimmed()),
-        None => println!("{} {} {}", "[-]".red(), title.title_pl, print_rating(&title.rating.as_ref())),
+        Some(id) => println!(
+            "{} {} {} {}{}",
+            "[+]".green(),
+            title.title_pl,
+            print_rating(&title.rating.as_ref()),
+            "|".dimmed(),
+            id.dimmed()
+        ),
+        None => println!(
+            "{} {} {}",
+            "[-]".red(),
+            title.title_pl,
+            print_rating(&title.rating.as_ref())
+        ),
     }
 }
-
 
 // should i make it a closure
 fn print_rating(fw_api: &Option<&FwApiDetails>) -> ColoredString {
