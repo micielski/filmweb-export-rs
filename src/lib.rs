@@ -317,10 +317,11 @@ impl FwRatedTitle {
     pub fn export_csv(self, files: &mut ExportFiles) {
         let title = self.title.unwrap_or(self.title_pl);
 
-        let rating = match self.rating {
-            Some(ref rating) => rating.rate.to_string(),
-            None => "no-vote".to_string(),
-        };
+        let rating = self
+            .rating
+            .as_ref()
+            .and_then(|r| Some(r.rate.to_string()))
+            .unwrap_or("no-vote".to_string());
 
         let imdb_id = self.imdb_id.unwrap_or("not-found".to_string());
 
