@@ -31,7 +31,7 @@ pub struct FwUser {
 }
 
 pub struct FwPage {
-    page_type: FwPageType,
+    pub page_type: FwPageType,
     pub page: u8,
     page_source: Html,
     pub rated_titles: Vec<FwRatedTitle>,
@@ -42,16 +42,16 @@ pub struct FwApiDetails {
     pub rate: u8,
     pub favorite: bool,
     #[serde(rename = "viewDate")]
-    view_date: u32,
-    timestamp: u128,
+    pub view_date: u32,
+    pub timestamp: u128,
 }
 
 pub struct FwRatedTitle {
-    title_id: u32,
+    pub title_id: u32,
     pub title_pl: String,
-    title: Option<String>,
-    title_type: FwPageType,
-    year: u16,
+    pub title: Option<String>,
+    pub title_type: FwPageType,
+    pub year: u16,
     pub rating: Option<FwApiDetails>,
     pub imdb_id: Option<String>,
 }
