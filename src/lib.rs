@@ -5,6 +5,8 @@ use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, fs, fs::File};
 
+const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux i686; rv:101.0) Gecko/20100101 Firefox/101.0";
+
 #[derive(Debug)]
 pub struct FwErrors;
 
@@ -16,7 +18,7 @@ impl fmt::Display for FwErrors {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum FwPageType {
     Films,
     Serials,
@@ -46,14 +48,23 @@ pub struct FwApiDetails {
     pub timestamp: u128,
 }
 
+#[derive(Debug)]
+pub struct IMDbApiDetails {
+    pub id: Option<String>,
+    pub duration: Option<u16>,
+}
+
+#[derive(Debug)]
 pub struct FwRatedTitle {
+    pub fw_url: String,
     pub title_id: u32,
     pub title_pl: String,
-    pub title: Option<String>,
+    pub title_orig: Option<String>,
     pub title_type: FwPageType,
+    pub duration: Option<u16>, // time in minutes
     pub year: u16,
     pub rating: Option<FwApiDetails>,
-    pub imdb_id: Option<String>,
+    pub imdb_data: Option<IMDbApiDetails>,
 }
 
 pub struct ExportFiles {
@@ -192,6 +203,16 @@ impl FwPage {
                 .select(&Selector::parse(".preview__originalTitle").unwrap())
                 .next()
                 .map(|element| element.inner_html());
+            let url: String = format!(
+                "https://filmweb.pl{}",
+                votebox
+                    .select(&Selector::parse(".preview__link").unwrap())
+                    .next()
+                    .unwrap()
+                    .value()
+                    .attr("href")
+                    .unwrap()
+            );
 
             // async closures, when?
             let api_response = match self.page_type {
@@ -214,6 +235,7 @@ impl FwPage {
                 FwPageType::WantsToSee => None,
             };
 
+            // JWT could be invalidated meanwhile
             let rating: Option<FwApiDetails> = match api_response {
                 Some(response) => match response.await?.json().await {
                     Ok(v) => v,
@@ -224,10 +246,12 @@ impl FwPage {
 
             let title_id = title_id.parse::<u32>().unwrap();
             self.rated_titles.push(FwRatedTitle::new(
+                url,
                 title_id,
                 title_pl,
                 title,
                 self.page_type,
+                None,
                 year.parse::<u16>().unwrap(),
                 rating,
             ));
@@ -238,110 +262,177 @@ impl FwPage {
 
 impl FwRatedTitle {
     fn new(
+        fw_url: String,
         title_id: u32,
         title_pl: String,
-        title: Option<String>,
+        title_orig: Option<String>,
         title_type: FwPageType,
+        duration: Option<u16>,
         year: u16,
         rating: Option<FwApiDetails>,
     ) -> Self {
         FwRatedTitle {
+            fw_url,
             title_id,
             title_pl,
-            title,
+            title_orig,
             title_type,
+            duration,
             year,
             rating,
-            imdb_id: None,
+            imdb_data: None,
         }
     }
 
+    pub async fn get_title_fw_duration(&mut self, fw_client: &Client) {
+        let response = fw_client.get(&self.fw_url).send().await.unwrap().text().await.unwrap();
+        let response = Html::parse_document(response.as_str());
+        let duration = response
+            .select(&Selector::parse(".filmCoverSection__duration").unwrap())
+            .next()
+            .unwrap()
+            .value()
+            .attr("data-duration")
+            .unwrap()
+            .parse::<u16>();
+
+        self.duration = duration.ok();
+    }
+
     // because async closures don't exist yet
-    pub async fn get_imdb_ids_logic(&mut self, imdb_client: &Client) {
-        self.imdb_id = match &self.title {
-            Some(title) => match self.get_imdb_ids(title, imdb_client, true).await {
-                Ok(id) => Some(id),
-                Err(_) => match self.get_imdb_ids(&self.title_pl, imdb_client, true).await {
-                    Ok(id) => Some(id),
-                    Err(_) => match self.get_imdb_ids(&self.title_pl, imdb_client, false).await {
-                        Ok(id) => Some(id),
+    pub async fn get_imdb_data_logic(&mut self, imdb_client: &Client) {
+        self.imdb_data = match &self.title_orig {
+            Some(title) => match self.get_imdb_data_advanced(title, imdb_client).await {
+                Ok(api) => Some(api),
+                Err(_) => match self.get_imdb_data_advanced(&self.title_pl, imdb_client).await {
+                    Ok(api) => Some(api),
+                    Err(_) => match self.get_imdb_data(&self.title_pl, imdb_client).await {
+                        Ok(api) => Some(api),
                         Err(_) => None,
                     },
                 },
             },
-            None => match self.get_imdb_ids(&self.title_pl, imdb_client, true).await {
-                Ok(id) => Some(id),
-                Err(_) => match self.get_imdb_ids(&self.title_pl, imdb_client, false).await {
-                    Ok(id) => Some(id),
+            None => match self.get_imdb_data_advanced(&self.title_pl, imdb_client).await {
+                Ok(api) => Some(api),
+                Err(_) => match self.get_imdb_data(&self.title_pl, imdb_client).await {
+                    Ok(api) => Some(api),
                     Err(_) => None,
                 },
             },
+        };
+
+        if let Some(api) = &mut self.imdb_data {
+            // Compare duration of a title on both sites to check if it's ok 100%
+            if let (Some(imdb_duration), Some(fw_duration)) = (api.duration, self.duration) {
+                let upper;
+                let lower;
+                // if true, it's probably a tv show, and they seem to be very different on both sites
+                // so let's be less restrictive then
+                if imdb_duration <= 60 && fw_duration <= 60 {
+                    upper = imdb_duration as f64 * 1.50;
+                    lower = imdb_duration as f64 * 0.50;
+                } else {
+                    upper = imdb_duration as f64 * 1.15;
+                    lower = imdb_duration as f64 * 0.85;
+                }
+                // if imdb duration doesn't fit into fw's then set it to none
+                if upper < fw_duration.into() && lower > fw_duration.into() {
+                    api.id = None;
+                }
+            }
         }
     }
 
-    pub async fn get_imdb_ids(
+    pub async fn get_imdb_data_advanced(
         &self,
         title: &String,
         imdb_client: &Client,
-        advanced: bool,
-    ) -> Result<String, Box<FwErrors>> {
-        let (url, tag) = match advanced {
-            true => {
-                let url = format!(
-                    "https://www.imdb.com/search/title/?title={}&release_date={},{}&adult=include",
-                    title, self.year, self.year
-                );
-                let tag = "div.lister-item-image";
-                (url, tag)
-            }
-            false => {
-                let url = format!("https://www.imdb.com/find?q={}", title);
-                let tag = ".result_text";
-                (url, tag)
-            }
-        };
+    ) -> Result<IMDbApiDetails, Box<FwErrors>> {
+        let url = format!(
+            "https://www.imdb.com/search/title/?title={}&release_date={},{}&adult=include",
+            title, self.year, self.year
+        );
+        let tag = "div.lister-item-image";
 
-        let results = imdb_client.get(url).send().await.unwrap().text().await.unwrap();
-        let results = Html::parse_document(results.as_str());
-        let title_id = match results.select(&Selector::parse(tag).unwrap()).next() {
+        let response = imdb_client.get(url).send().await.unwrap().text().await.unwrap();
+        let response = Html::parse_document(response.as_str());
+        let title_id = match response.select(&Selector::parse(tag).unwrap()).next() {
             Some(id) => id,
             None => return Err(Box::new(FwErrors)),
         };
         let title_id = title_id.inner_html();
-        let re = Regex::new(r"(\d{7})").unwrap();
-        let title_id = re.captures(title_id.as_str()).unwrap().get(0).unwrap().as_str();
+        let re = Regex::new(r"(\d{7,8})").unwrap();
+        let title_id = format!(
+            "{:08}",
+            re.captures(title_id.as_str()).unwrap().get(0).unwrap().as_str()
+        );
 
-        Ok(format!("{:07}", title_id))
+        let duration = {
+            let x = match response.select(&Selector::parse(".runtime").unwrap()).next() {
+                Some(a) => a.inner_html().replace(" min", ""),
+                None => return Err(Box::new(FwErrors)),
+            };
+            match x.parse::<u16>() {
+                Ok(x) => Some(x),
+                Err(_) => return Err(Box::new(FwErrors)),
+            }
+        };
+
+        let imdb_data = IMDbApiDetails {
+            id: Some(title_id.trim().parse::<u32>().unwrap().to_string()),
+            duration,
+        };
+
+        Ok(imdb_data)
+    }
+
+    pub async fn get_imdb_data(&self, title: &String, imdb_client: &Client) -> Result<IMDbApiDetails, Box<FwErrors>> {
+        let url = format!("https://www.imdb.com/find?q={}", title);
+        let tag = ".result_text";
+
+        let response = imdb_client.get(url).send().await.unwrap().text().await.unwrap();
+        let response = Html::parse_document(response.as_str());
+        let title_id = match response.select(&Selector::parse(tag).unwrap()).next() {
+            Some(id) => id,
+            None => return Err(Box::new(FwErrors)),
+        };
+        let title_id = title_id.inner_html();
+        let re = Regex::new(r"(\d{7,8})").unwrap();
+        let title_id = format!(
+            "{:08}",
+            re.captures(title_id.as_str()).unwrap().get(0).unwrap().as_str()
+        );
+
+        let duration = None;
+
+        let imdb_data = IMDbApiDetails {
+            id: Some(title_id.trim().parse::<u32>().unwrap().to_string()),
+            duration,
+        };
+
+        Ok(imdb_data)
     }
 
     pub fn export_csv(self, files: &mut ExportFiles) {
-        let title = self.title.unwrap_or(self.title_pl);
+        let title = self.title_orig.unwrap_or(self.title_pl);
 
         let rating = self
             .rating
             .as_ref()
-            .and_then(|r| Some(r.rate.to_string()))
-            .unwrap_or("no-vote".to_string());
+            .map(|r| r.rate.to_string())
+            .unwrap_or_else(|| "no-vote".to_string());
 
-        let imdb_id = self.imdb_id.unwrap_or("not-found".to_string());
+        let imdb_id = self.imdb_data.unwrap().id.unwrap_or_else(|| "not-found".to_string());
 
+        let year = self.year.to_string();
+
+        let mut fields = ["", "", "", "", "", "", "", "", "", "", "", "", ""];
+        fields[0] = imdb_id.as_ref();
+        fields[1] = rating.as_ref();
+        fields[3] = title.as_ref();
+        fields[9] = year.as_ref();
         let write_title = |file: &mut Writer<File>| {
-            file.write_record(&[
-                imdb_id.as_ref(),
-                rating.as_ref(),
-                "",
-                title.as_ref(),
-                "",
-                "",
-                "",
-                "",
-                "",
-                self.year.to_string().as_ref(),
-                "",
-                "",
-                "",
-            ])
-            .unwrap();
+            file.write_record(fields).unwrap();
             file.flush().unwrap();
         };
 
@@ -367,7 +458,7 @@ pub fn filmweb_client_builder(user: &FwUser) -> Result<Client, reqwest::Error> {
     headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("gzip"));
 
     reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (X11; Linux i686; rv:101.0) Gecko/20100101 Firefox/101.0")
+        .user_agent(USER_AGENT)
         .gzip(true)
         .default_headers(headers)
         .cookie_store(true)
@@ -380,7 +471,7 @@ pub fn imdb_client_builder() -> Result<Client, reqwest::Error> {
     headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("gzip"));
 
     reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (X11; Linux i686; rv:101.0) Gecko/20100101 Firefox/101.0")
+        .user_agent(USER_AGENT)
         .gzip(true)
         .default_headers(headers)
         .cookie_store(true)
