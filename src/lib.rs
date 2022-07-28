@@ -50,7 +50,7 @@ pub struct FwApiDetails {
 
 #[derive(Debug)]
 pub struct IMDbApiDetails {
-    pub id: Option<String>,
+    pub id: String,
     pub duration: Option<u16>,
 }
 
@@ -83,7 +83,7 @@ impl FwUser {
         }
     }
 
-    pub async fn get_counts(&self, fw_client: &Client) -> Result<(u16, u16, u16), Box<dyn std::error::Error>> {
+    pub async fn get_counts(&self, fw_client: &Client) -> Result<(u8, u8, u8), Box<dyn std::error::Error>> {
         let user_source = fw_client
             .get(format!("https://www.filmweb.pl/user/{}", self.username))
             .send()
@@ -91,32 +91,32 @@ impl FwUser {
             .text()
             .await?;
         let user_source = Html::parse_document(user_source.as_str());
-        let film_count: u16 = user_source
+        let film_count: u8 = user_source
             .select(&Selector::parse(".VoteStatsBox").unwrap())
             .next()
             .unwrap()
             .value()
             .attr("data-filmratedcount")
             .unwrap()
-            .parse::<u16>()
+            .parse::<u8>()
             .unwrap();
-        let serials_count: u16 = user_source
+        let serials_count: u8 = user_source
             .select(&Selector::parse(".VoteStatsBox").unwrap())
             .next()
             .unwrap()
             .value()
             .attr("data-serialratedcount")
             .unwrap()
-            .parse::<u16>()
+            .parse::<u8>()
             .unwrap();
-        let want2see_count: u16 = user_source
+        let want2see_count: u8 = user_source
             .select(&Selector::parse(".VoteStatsBox").unwrap())
             .next()
             .unwrap()
             .value()
             .attr("data-filmw2scount")
             .unwrap()
-            .parse::<u16>()
+            .parse::<u8>()
             .unwrap();
         Ok((film_count, serials_count, want2see_count))
     }
@@ -298,6 +298,7 @@ impl FwRatedTitle {
 
         self.duration = duration.ok();
     }
+    
 
     // because async closures don't exist yet
     pub async fn get_imdb_data_logic(&mut self, imdb_client: &Client) {
@@ -337,7 +338,7 @@ impl FwRatedTitle {
                 }
                 // if imdb duration doesn't fit into fw's then set it to none
                 if upper < fw_duration.into() && lower > fw_duration.into() {
-                    api.id = None;
+                    api.id = "not-found".to_string();
                 }
             }
         }
@@ -379,7 +380,7 @@ impl FwRatedTitle {
         };
 
         let imdb_data = IMDbApiDetails {
-            id: Some(title_id.trim().parse::<u32>().unwrap().to_string()),
+            id: title_id.trim().parse::<u32>().unwrap().to_string(),
             duration,
         };
 
@@ -406,15 +407,15 @@ impl FwRatedTitle {
         let duration = None;
 
         let imdb_data = IMDbApiDetails {
-            id: Some(title_id.trim().parse::<u32>().unwrap().to_string()),
+            id: title_id.trim().parse::<u32>().unwrap().to_string(),
             duration,
         };
 
         Ok(imdb_data)
     }
 
-    pub fn export_csv(self, files: &mut ExportFiles) {
-        let title = self.title_orig.unwrap_or(self.title_pl);
+    pub fn export_csv(&self, files: &mut ExportFiles) {
+        let title = self.title_orig.as_ref().unwrap_or(&self.title_pl);
 
         let rating = self
             .rating
@@ -422,7 +423,7 @@ impl FwRatedTitle {
             .map(|r| r.rate.to_string())
             .unwrap_or_else(|| "no-vote".to_string());
 
-        let imdb_id = self.imdb_data.unwrap().id.unwrap_or_else(|| "not-found".to_string());
+        let imdb_id = &self.imdb_data.as_ref().unwrap().id;
 
         let year = self.year.to_string();
 
@@ -436,7 +437,7 @@ impl FwRatedTitle {
             file.flush().unwrap();
         };
 
-        match self.rating {
+        match &self.rating {
             Some(yes) => match yes.favorite {
                 true => write_title(&mut files.favorited),
                 false => write_title(&mut files.generic),
@@ -500,7 +501,13 @@ impl ExportFiles {
             .unwrap();
             wtr
         };
-        let _ = fs::create_dir("./exports");
+        if let Err(e) = fs::create_dir("./exports") {
+            match e.kind() {
+                std::io::ErrorKind::PermissionDenied => panic!("{}", e),
+                // TODO: add more when other kinds will stabilize
+                _ => (),
+            }
+        };
         let generic = File::create("exports/generic.csv").unwrap();
         let want2see = File::create("exports/want2see.csv").unwrap();
         let favorited = File::create("exports/favorited.csv").unwrap();
