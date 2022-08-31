@@ -3,7 +3,9 @@ use regex::Regex;
 use reqwest::{header, Client};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt, fs, fs::File};
+use tokio::task::spawn_blocking;
+use core::time;
+use std::{error::Error, fmt, fs, fs::File, thread, io::Write};
 
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux i686; rv:101.0) Gecko/20100101 Firefox/101.0";
 
@@ -35,7 +37,7 @@ pub struct FwUser {
 pub struct FwPage {
     pub page_type: FwPageType,
     pub page: u8,
-    page_source: Html,
+    page_source: String,
     pub rated_titles: Vec<FwRatedTitle>,
 }
 
@@ -50,6 +52,7 @@ pub struct FwApiDetails {
 
 #[derive(Debug)]
 pub struct IMDbApiDetails {
+    pub title: String,
     pub id: String,
     pub duration: Option<u16>,
 }
@@ -75,7 +78,7 @@ pub struct ExportFiles {
 
 impl FwUser {
     pub async fn new(username: String, token: String, session: String, jwt: String) -> Self {
-        FwUser {
+        Self {
             username,
             token,
             session,
@@ -83,40 +86,40 @@ impl FwUser {
         }
     }
 
-    pub async fn get_counts(&self, fw_client: &Client) -> Result<(u8, u8, u8), Box<dyn std::error::Error>> {
+    pub async fn get_counts(&self, fw_client: &Client) -> Result<(u16, u16, u16), Box<dyn std::error::Error>> {
         let user_source = fw_client
             .get(format!("https://www.filmweb.pl/user/{}", self.username))
             .send()
-            .await?
+            .await.unwrap()
             .text()
-            .await?;
+            .await.unwrap();
         let user_source = Html::parse_document(user_source.as_str());
-        let film_count: u8 = user_source
+        let film_count: u16 = user_source
             .select(&Selector::parse(".VoteStatsBox").unwrap())
             .next()
             .unwrap()
             .value()
             .attr("data-filmratedcount")
             .unwrap()
-            .parse::<u8>()
+            .parse::<u16>()
             .unwrap();
-        let serials_count: u8 = user_source
+        let serials_count: u16 = user_source
             .select(&Selector::parse(".VoteStatsBox").unwrap())
             .next()
             .unwrap()
             .value()
             .attr("data-serialratedcount")
             .unwrap()
-            .parse::<u8>()
+            .parse::<u16>()
             .unwrap();
-        let want2see_count: u8 = user_source
+        let want2see_count: u16 = user_source
             .select(&Selector::parse(".VoteStatsBox").unwrap())
             .next()
             .unwrap()
             .value()
             .attr("data-filmw2scount")
             .unwrap()
-            .parse::<u8>()
+            .parse::<u16>()
             .unwrap();
         Ok((film_count, serials_count, want2see_count))
     }
@@ -124,10 +127,8 @@ impl FwUser {
 
 impl FwPage {
     pub async fn new(page: u8, page_type: FwPageType, user: &FwUser, fw_client: &Client) -> Self {
-        let page_source = FwPage::get_filmweb_page(user, page, &page_type, fw_client)
-            .await
-            .unwrap();
-        FwPage {
+        let page_source = Self::get_filmweb_page(user, page, page_type, fw_client).await.unwrap();
+        Self {
             page,
             page_type,
             page_source,
@@ -138,9 +139,9 @@ impl FwPage {
     async fn get_filmweb_page(
         user: &FwUser,
         fw_page: u8,
-        fw_page_type: &FwPageType,
+        fw_page_type: FwPageType,
         fw_client: &Client,
-    ) -> Result<Html, Box<dyn std::error::Error>> {
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let filmweb_user = match fw_page_type {
             FwPageType::Films => {
                 fw_client
@@ -149,9 +150,9 @@ impl FwPage {
                         user.username, fw_page
                     ))
                     .send()
-                    .await?
+                    .await.unwrap()
                     .text()
-                    .await?
+                    .await.unwrap()
             }
             FwPageType::Serials => {
                 fw_client
@@ -160,9 +161,9 @@ impl FwPage {
                         user.username, fw_page
                     ))
                     .send()
-                    .await?
+                    .await.unwrap()
                     .text()
-                    .await?
+                    .await.unwrap()
             }
             FwPageType::WantsToSee => {
                 fw_client
@@ -176,12 +177,15 @@ impl FwPage {
                     .await?
             }
         };
-
-        return Ok(Html::parse_document(filmweb_user.as_str()));
+        //return Ok(Html::parse_document(filmweb_user.as_str()));
+        let mut file = File::create("otpot.html").unwrap();
+        file.write_all(filmweb_user.as_str().as_bytes()).unwrap();
+        Ok(filmweb_user)
     }
 
     pub async fn scrape_voteboxes(&mut self, fw_client: &Client) -> Result<(), Box<dyn std::error::Error>> {
-        for votebox in self.page_source.select(&Selector::parse("div.myVoteBox").unwrap()) {
+        let html = Html::parse_document(&self.page_source);
+        for votebox in html.select(&Selector::parse("div.myVoteBox").unwrap()) {
             let title_id = votebox
                 .select(&Selector::parse(".previewFilm").unwrap())
                 .next()
@@ -213,8 +217,6 @@ impl FwPage {
                     .attr("href")
                     .unwrap()
             );
-
-            // async closures, when?
             let api_response = match self.page_type {
                 FwPageType::Films => Some(
                     fw_client
@@ -237,7 +239,7 @@ impl FwPage {
 
             // JWT could be invalidated meanwhile
             let rating: Option<FwApiDetails> = match api_response {
-                Some(response) => match response.await?.json().await {
+                Some(response) => match response.await.unwrap().json().await {
                     Ok(v) => v,
                     Err(e) => panic!("Provided JWT is invalid, {}", e),
                 },
@@ -261,7 +263,7 @@ impl FwPage {
 }
 
 impl FwRatedTitle {
-    fn new(
+    const fn new(
         fw_url: String,
         title_id: u32,
         title_pl: String,
@@ -271,7 +273,7 @@ impl FwRatedTitle {
         year: u16,
         rating: Option<FwApiDetails>,
     ) -> Self {
-        FwRatedTitle {
+        Self {
             fw_url,
             title_id,
             title_pl,
@@ -298,7 +300,6 @@ impl FwRatedTitle {
 
         self.duration = duration.ok();
     }
-    
 
     // because async closures don't exist yet
     pub async fn get_imdb_data_logic(&mut self, imdb_client: &Client) {
@@ -330,11 +331,11 @@ impl FwRatedTitle {
                 // if true, it's probably a tv show, and they seem to be very different on both sites
                 // so let's be less restrictive then
                 if imdb_duration <= 60 && fw_duration <= 60 {
-                    upper = imdb_duration as f64 * 1.50;
-                    lower = imdb_duration as f64 * 0.50;
+                    upper = f64::from(imdb_duration) * 1.50;
+                    lower = f64::from(imdb_duration) * 0.50;
                 } else {
-                    upper = imdb_duration as f64 * 1.15;
-                    lower = imdb_duration as f64 * 0.85;
+                    upper = f64::from(imdb_duration) * 1.15;
+                    lower = f64::from(imdb_duration) * 0.85;
                 }
                 // if imdb duration doesn't fit into fw's then set it to none
                 if upper < fw_duration.into() && lower > fw_duration.into() {
@@ -344,6 +345,7 @@ impl FwRatedTitle {
         }
     }
 
+    // TODO: simplify these functions
     pub async fn get_imdb_data_advanced(
         &self,
         title: &String,
@@ -353,15 +355,23 @@ impl FwRatedTitle {
             "https://www.imdb.com/search/title/?title={}&release_date={},{}&adult=include",
             title, self.year, self.year
         );
-        let tag = "div.lister-item-image";
-
         let response = imdb_client.get(url).send().await.unwrap().text().await.unwrap();
         let response = Html::parse_document(response.as_str());
-        let title_id = match response.select(&Selector::parse(tag).unwrap()).next() {
+        let title_data = match response
+            .select(&Selector::parse("div.lister-item-image").unwrap())
+            .next()
+        {
             Some(id) => id,
             None => return Err(Box::new(FwErrors)),
         };
-        let title_id = title_id.inner_html();
+        let title_id = title_data.inner_html();
+        let imdb_title = response
+            .select(&Selector::parse("img.loadlate").unwrap())
+            .next()
+            .unwrap()
+            .value()
+            .attr("alt")
+            .unwrap();
         let re = Regex::new(r"(\d{7,8})").unwrap();
         let title_id = format!(
             "{:08}",
@@ -378,9 +388,9 @@ impl FwRatedTitle {
                 Err(_) => return Err(Box::new(FwErrors)),
             }
         };
-
         let imdb_data = IMDbApiDetails {
             id: title_id.trim().parse::<u32>().unwrap().to_string(),
+            title: imdb_title.to_string(),
             duration,
         };
 
@@ -389,14 +399,27 @@ impl FwRatedTitle {
 
     pub async fn get_imdb_data(&self, title: &String, imdb_client: &Client) -> Result<IMDbApiDetails, Box<FwErrors>> {
         let url = format!("https://www.imdb.com/find?q={}", title);
-        let tag = ".result_text";
-
         let response = imdb_client.get(url).send().await.unwrap().text().await.unwrap();
-        let response = Html::parse_document(response.as_str());
-        let title_id = match response.select(&Selector::parse(tag).unwrap()).next() {
+        let response_parsed = Html::parse_document(response.as_str());
+        let title_id = match response_parsed.select(&Selector::parse(".result_text").unwrap()).next() {
             Some(id) => id,
             None => return Err(Box::new(FwErrors)),
         };
+        // get url of a title, and grab the duration
+        let url_suffix = response_parsed
+            .select(&Selector::parse("td.result_text a").unwrap())
+            .next()
+            .unwrap()
+            .value()
+            .attr("href")
+            .unwrap();
+        let full_url = format!("https://www.imdb.com{}", url_suffix);
+        let response = imdb_client.get(full_url).send().await.unwrap().text().await.unwrap();
+        let response_parsed = Html::parse_document(response.as_str());
+        let duration = response_parsed.select(&Selector::parse(".ipc-inline-list__item").unwrap()).nth(5).unwrap().inner_html();
+        println!("{duration}");
+        let imdb_title = response_parsed.select(&Selector::parse("a").unwrap()).next().unwrap().inner_html();
+
         let title_id = title_id.inner_html();
         let re = Regex::new(r"(\d{7,8})").unwrap();
         let title_id = format!(
@@ -404,11 +427,10 @@ impl FwRatedTitle {
             re.captures(title_id.as_str()).unwrap().get(0).unwrap().as_str()
         );
 
-        let duration = None;
-
         let imdb_data = IMDbApiDetails {
             id: title_id.trim().parse::<u32>().unwrap().to_string(),
-            duration,
+            title: imdb_title,
+            duration: None,
         };
 
         Ok(imdb_data)
@@ -420,8 +442,7 @@ impl FwRatedTitle {
         let rating = self
             .rating
             .as_ref()
-            .map(|r| r.rate.to_string())
-            .unwrap_or_else(|| "no-vote".to_string());
+            .map_or_else(|| "no.vote".to_string(), |r| r.rate.to_string());
 
         let imdb_id = &self.imdb_data.as_ref().unwrap().id;
 
@@ -438,10 +459,13 @@ impl FwRatedTitle {
         };
 
         match &self.rating {
-            Some(yes) => match yes.favorite {
-                true => write_title(&mut files.favorited),
-                false => write_title(&mut files.generic),
-            },
+            Some(yes) => {
+                if yes.favorite {
+                    write_title(&mut files.favorited);
+                } else {
+                    write_title(&mut files.generic);
+                }
+            }
             None => write_title(&mut files.want2see),
         }
     }
@@ -449,7 +473,7 @@ impl FwRatedTitle {
 
 pub fn filmweb_client_builder(user: &FwUser) -> Result<Client, reqwest::Error> {
     let cookies = format!(
-        "_fwuser_token={}; _fwuser_sessionId={}; JWT={}",
+        "_fwuser_token={}; _fwuser_sessionId={}; JWT={};",
         user.token, user.session, user.jwt
     );
 
@@ -514,7 +538,7 @@ impl ExportFiles {
         let generic = write_header(generic);
         let want2see = write_header(want2see);
         let favorited = write_header(favorited);
-        ExportFiles {
+        Self {
             generic,
             want2see,
             favorited,

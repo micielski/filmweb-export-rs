@@ -1,7 +1,8 @@
 use clap::Parser;
 use colored::Colorize;
 use reqwest::Client;
-use std::{error::Error, io, io::Write};
+use std::{error::Error, io, io::Write, sync::Arc};
+use tokio::sync::Mutex;
 
 use filmweb_export_rs::{
     filmweb_client_builder, imdb_client_builder, ExportFiles, FwPage, FwPageType, FwRatedTitle, FwUser,
@@ -23,38 +24,33 @@ struct Args {
     jwt: String,
 }
 
-struct Pages {
-    films: Vec<FwPage>,
-    serials: Vec<FwPage>,
-    wants2see: Vec<FwPage>,
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    export(args).await?;
-    Ok(())
-}
-
-async fn export(args: Args) -> Result<(), Box<dyn Error>> {
+    let mut exported_pages: Vec<FwPage> = Vec::new();
     let mut export_files = ExportFiles::default();
     let user = FwUser::new(args.username, args.token, args.session, args.jwt).await;
     let fw_client = filmweb_client_builder(&user).unwrap();
-    let counts = user.get_counts(&fw_client).await?;
     let imdb_client = imdb_client_builder().unwrap();
 
-    let mut pages = Pages {
-        films: Vec::new(),
-        serials: Vec::new(),
-        wants2see: Vec::new(),
-    };
 
-    let films_pages = counts.0 / 25 + 1;
-    let serials_pages = counts.1 / 25 + 1;
-    let wants2see_pages = counts.2 / 25 + 1;
+    // Get count of rated films, and convert it to number of pages
+    let counts = user.get_counts(&fw_client).await?;
+    let films_pages = (counts.0 / 25 + 1) as u16;
+    let serials_pages = (counts.1 / 25 + 1) as u16;
+    let wants2see_pages = (counts.2 / 25 + 1) as u16;
 
+    // BEGINNING OF SCRAPING ACTUAL DATA FROM Filmweb //
     print!("\r{} Scraping films...", "[i]".blue());
-    scrape_fw(films_pages, &user, FwPageType::Films, "films", &fw_client, &mut pages).await;
+    scrape_fw(
+        films_pages,
+        &user,
+        FwPageType::Films,
+        "films",
+        &fw_client,
+        &mut exported_pages,
+    )
+    .await;
 
     print!("\r{} Scraping serials...", "[i]".blue());
     scrape_fw(
@@ -63,7 +59,7 @@ async fn export(args: Args) -> Result<(), Box<dyn Error>> {
         FwPageType::Serials,
         "serials",
         &fw_client,
-        &mut pages,
+        &mut exported_pages,
     )
     .await;
 
@@ -74,30 +70,41 @@ async fn export(args: Args) -> Result<(), Box<dyn Error>> {
         FwPageType::WantsToSee,
         "wants2see",
         &fw_client,
-        &mut pages,
+        &mut exported_pages,
     )
     .await;
+    // END OF SCRAPING DATA FROM Filmweb //
 
-    let mut all = Vec::new();
-    all.extend(pages.films);
-    all.extend(pages.serials);
-    all.extend(pages.wants2see);
-    // Obvious ways to minimize the code doesn't work
-    imdb_id_and_export(&mut all, &fw_client, &imdb_client, &mut export_files).await;
+    get_imdb_data_and_to_file(&mut exported_pages, &fw_client, &imdb_client, &mut export_files).await;
 
     println!("These following titles were unexported:");
-    print_unexported(&all);
+    print_unexported(&exported_pages).await;
 
     Ok(())
 }
 
-async fn fetch_page(user: &FwUser, page: u8, page_type: FwPageType, fw_client: &Client, pages: &mut Pages) {
+// async fn get_imdb_id_and_export(
+//     pages: &mut Vec<FwPage>,
+//     fw_client: &Client,
+//     imdb_client: &Client,
+//     export_files: &mut ExportFiles,
+// ) {
+//     for page in &mut *pages {
+//         for title in &mut *page.rated_titles {
+//             title.get_title_fw_duration(fw_client).await;
+//             title.get_imdb_data_logic(imdb_client).await;
+//             print_title(title);
+//             title.export_csv(export_files);
+//         }
+//     }
+// }
+async fn fetch_page(user: &FwUser, page: u16, page_type: FwPageType, fw_client: &Client, pages: &mut Vec<FwPage>) {
     let mut fw_page = FwPage::new(page as u8, page_type, user, fw_client).await;
     fw_page.scrape_voteboxes(fw_client).await.unwrap();
-    pages.films.push(fw_page);
+    pages.push(fw_page);
 }
 
-async fn imdb_id_and_export(
+async fn get_imdb_data_and_to_file(
     pages: &mut Vec<FwPage>,
     fw_client: &Client,
     imdb_client: &Client,
@@ -114,12 +121,12 @@ async fn imdb_id_and_export(
 }
 
 async fn scrape_fw(
-    total_pages: u8,
+    total_pages: u16,
     user: &FwUser,
     page_type: FwPageType,
     what: &str,
     fw_client: &Client,
-    pages: &mut Pages,
+    pages: &mut Vec<FwPage>,
 ) {
     for i in 1..=total_pages {
         fetch_page(user, i, page_type, fw_client, pages).await;
@@ -132,7 +139,41 @@ async fn scrape_fw(
     }
 }
 
-fn print_unexported(pages: &Vec<FwPage>) {
+//  async fn scrape_fw(
+//      total_pages: u8,
+//      user: &FwUser,
+//      page_type: FwPageType,
+//      what: &str,
+//      fw_client: &Client,
+//      pages: &mut Vec<FwPage>,
+//  ) {
+//     let mut futures = Vec::new();
+//     for i in 1..=total_pages {
+//         let fw_client_copy = Arc::clone(&fw_client);
+//         let fw_user_copy = Arc::clone(&user);
+//         let fw_pages_copy = Arc::clone(&pages);
+//         thread::sleep(time::Duration::from_millis(5000));
+//         futures.push(tokio::spawn(async move {
+//             fw_pages_copy
+//                 .lock()
+//                 .await
+//                 .push(FwPage::new(i, page_type, &fw_user_copy, &*fw_client_copy).await);
+//         }));
+//     }
+//   join_all(futures).await;
+//      for i in 1..=total_pages {
+//          pages.push(FwPage::new(i, page_type, &*user, &*fw_client).await);
+//          pages[i as usize - 1].scrape_voteboxes(fw_client).await.unwrap();
+//          if i == total_pages {
+//              println!("\r{} Scraping {}... [{}/{}]", "[i]".blue(), what, i, total_pages);
+//          } else {
+//              print!("\r{} Scraping {}... [{}/{}]", "[i]".blue(), what, i, total_pages);
+//          }
+//          io::stdout().flush().unwrap();
+//      }
+// }
+
+async fn print_unexported(pages: &Vec<FwPage>) {
     for page in pages {
         for title in &page.rated_titles {
             if title.imdb_data.as_ref().unwrap().id == "not-found" {
@@ -157,13 +198,19 @@ fn print_title(title: &FwRatedTitle) {
 
     match &title.imdb_data {
         Some(data) => println!(
-            "{} {} {} {}{}",
+            "{} {} {} {}{} {}",
             "[+]".green(),
             title.title_pl,
             print_rating(),
-            "| ".dimmed(),
-            data.id.dimmed()
+            "-> | ".dimmed(),
+            title.imdb_data.as_ref().unwrap().title.dimmed(),
+            data.id.dimmed(),
         ),
         None => println!("{} {} {}", "[-]".red(), title.title_pl, print_rating()),
     }
+}
+
+#[tokio::test]
+async fn my_test() {
+
 }
