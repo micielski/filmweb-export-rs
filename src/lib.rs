@@ -3,9 +3,7 @@ use regex::Regex;
 use reqwest::{header, Client};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
-use tokio::task::spawn_blocking;
-use core::time;
-use std::{error::Error, fmt, fs, fs::File, thread, io::Write};
+use std::{error::Error, fmt, fs, fs::File, io::Write};
 
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux i686; rv:101.0) Gecko/20100101 Firefox/101.0";
 

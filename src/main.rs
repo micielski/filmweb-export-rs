@@ -57,9 +57,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     get_imdb_data_and_save(&mut exported_pages, &fw_client, &imdb_client, &mut export_files).await;
-
-    println!("These following titles were unexported:");
-    print_unexported(&exported_pages).await;
+    print_failed(&exported_pages).await;
 
     Ok(())
 }
@@ -105,7 +103,8 @@ async fn scrape_fw(
     }
 }
 
-async fn print_unexported(pages: &Vec<FwPage>) {
+async fn print_failed(pages: &Vec<FwPage>) {
+    println!("Following titles couldn't be found:");
     for page in pages {
         for title in &page.rated_titles {
             if title.imdb_data.as_ref().unwrap().id == "not-found" {
@@ -141,6 +140,3 @@ fn print_title(title: &FwRatedTitle) {
         None => println!("{} {} {}", "[-]".red(), title.title_pl, print_rating()),
     }
 }
-
-#[tokio::test]
-async fn my_test() {}
