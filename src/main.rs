@@ -12,7 +12,7 @@ use std::{
 
 use filmweb_export_rs::{
     filmweb_client_builder, imdb_client_builder, ExportFiles, FwPage, FwPageNumber, FwRatedTitle, FwUser,
-    IMDbApiDetails,
+    IMDbApiDetails, FwTitleType
 };
 
 #[derive(Parser, Debug)]
@@ -44,9 +44,12 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
+    println!("{}", "filmweb-export starting...".yellow());
+
     let exported_pages: Arc<Arc<Mutex<Vec<FwPage>>>> = Arc::new(Arc::new(Mutex::new(Vec::new())));
     let export_files = Arc::new(Mutex::new(ExportFiles::default()));
     let user = FwUser::new(args.username, args.token, args.session, args.jwt);
+
     let fw_client = filmweb_client_builder(&user).unwrap();
     let imdb_client = imdb_client_builder().unwrap();
 
@@ -58,11 +61,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Scraping actual data from Filmweb
     for (what, pages_count, page_type) in [
-        ("films", films_pages, FwPageNumber::Films(0)),
-        ("serials", serials_pages, FwPageNumber::Serials(0)),
-        ("wants2see", wants2see_pages, FwPageNumber::WantsToSee(0)),
+        ("films", films_pages, FwTitleType::Film),
+        ("serials", serials_pages, FwTitleType::Serial),
+        ("wants2see", wants2see_pages, FwTitleType::WantsToSee)
     ] {
-        print!("\r{} Scraping {}...", "[i]".blue(), what);
         scrape_fw(
             pages_count,
             &user,
@@ -83,7 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn scrape_fw(
     total_pages: u8,
     user: &FwUser,
-    page_type: FwPageNumber,
+    page_type: FwTitleType,
     what: &str,
     fw_client: &Client,
     pages: &Arc<Mutex<Vec<FwPage>>>,
@@ -97,9 +99,9 @@ fn scrape_fw(
             let pages_clone = Arc::clone(pages);
             s.spawn(move |_| {
                 let page_type = match *page_type_clone {
-                    FwPageNumber::Films(_) => FwPageNumber::Films(i),
-                    FwPageNumber::Serials(_) => FwPageNumber::Serials(i),
-                    FwPageNumber::WantsToSee(_) => FwPageNumber::WantsToSee(i),
+                    FwTitleType::Film => FwPageNumber::Films(i),
+                    FwTitleType::Serial => FwPageNumber::Serials(i),
+                    FwTitleType::WantsToSee => FwPageNumber::WantsToSee(i),
                 };
                 let mut fw_page = FwPage::new(page_type, user, fw_client);
                 if fw_page.scrape_from_page(fw_client).is_err() {
@@ -107,15 +109,12 @@ fn scrape_fw(
                     std::process::exit(1);
                 };
                 pages_clone.lock().unwrap().push(fw_page);
-                if i == total_pages {
-                    println!("\r{} Scraping {}... [{}/{}]", "[i]".blue(), what, i, total_pages);
-                } else {
-                    print!("\r{} Scraping {}... [{}/{}]", "[i]".blue(), what, i, total_pages);
-                }
+                print!("\r{} Scraping {}... [{}/{}]", "[i]".blue(), what, i, total_pages);
                 io::stdout().flush().unwrap();
             });
         }
     });
+    println!();
 }
 
 fn get_imdb_data_and_save(

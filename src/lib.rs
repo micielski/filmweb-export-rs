@@ -453,10 +453,8 @@ impl FwRatedTitle {
             .attr("href")
             .unwrap();
         let full_url = format!("https://www.imdb.com{}", url_suffix);
-        println!("{full_url}");
         let response = imdb_client.get(full_url).send().unwrap().text().unwrap();
         let response_parsed = Html::parse_document(response.as_str());
-        println!("{title}, {year}");
 
         let get_duration = |nth| {
             response_parsed
@@ -475,13 +473,11 @@ impl FwRatedTitle {
             return Err(Box::new(FwErrors::InvalidDuration));
         }
 
-        println!("{title}");
         let duration = {
             let mut duration;
             let mut dirty_duration = dirty_duration.replace("<!---->", "");
             if dirty_duration.contains('h') {
                 let mut dirty_duration = dirty_duration.replace(' ', "");
-                println!("{dirty_duration}");
                 duration = dirty_duration
                     .chars()
                     .next()
@@ -498,8 +494,6 @@ impl FwRatedTitle {
             }
             duration
         };
-
-        println!("{duration}");
 
         let title_id = title_id.inner_html();
         let re = Regex::new(r"(\d{7,8})").unwrap();
