@@ -4,24 +4,21 @@ use reqwest::blocking::Client;
 use reqwest::header;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt, fs, fs::File};
+use std::{fs, fs::File};
+use thiserror::Error;
 
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux i686; rv:101.0) Gecko/20100101 Firefox/101.0";
 
-// TODO: use thiserror or anyhow idk, whatever is suitable for a lib
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum FwErrors {
+    #[error("title not found")]
     ZeroResults,
+    #[error("couldn't fetch duration")]
     InvalidDuration,
+    #[error("provided JWT is invalid/invalidated")]
     InvalidJwt,
-}
-
-impl Error for FwErrors {}
-
-impl fmt::Display for FwErrors {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Error occured") // it will change soon, dont worry
-    }
+    #[error("year parsing error")]
+    InvalidYear { title_id: u32, failed_year: String },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -50,10 +47,18 @@ impl From<FwPageNumber> for FwTitleType {
 
 #[derive(Debug)]
 pub struct FwUser {
-    username: String,
-    token: String,
-    session: String,
-    jwt: String,
+    pub username: String,
+    pub token: String,
+    pub session: String,
+    pub jwt: String,
+    pub titles_count: Option<TitlesCount>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TitlesCount {
+    pub films: u16,
+    pub serials: u16,
+    pub marked_to_see: u16,
 }
 
 #[derive(Debug)]
@@ -107,53 +112,77 @@ pub struct ExportFiles {
 
 impl FwUser {
     #[must_use]
-    pub const fn new(username: String, token: String, session: String, jwt: String) -> Self {
+    pub fn new(username: String, token: String, session: String, jwt: String) -> Self {
         Self {
             username,
             token,
             session,
             jwt,
+            titles_count: None,
         }
     }
+    pub fn filmweb_client_builder(&self) -> Result<Client, reqwest::Error> {
+        log::debug!("Creating Filmweb Client");
+        let cookies = format!(
+            "_fwuser_token={}; _fwuser_sessionId={}; JWT={};",
+            self.token, self.session, self.jwt
+        );
 
-    pub fn get_counts(&self, fw_client: &Client) -> Result<(u16, u16, u16), Box<dyn std::error::Error>> {
-        let user_source = fw_client
-            .get(format!("https://www.filmweb.pl/user/{}", self.username))
-            .send()
-            .unwrap()
-            .text()
-            .unwrap();
-        let user_source = Html::parse_document(user_source.as_str());
-        let film_count: u16 = user_source
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::COOKIE, header::HeaderValue::from_str(&cookies).unwrap());
+        headers.insert(header::CONNECTION, header::HeaderValue::from_static("keep-alive"));
+        headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("gzip"));
+
+        Client::builder()
+            .user_agent(USER_AGENT)
+            .gzip(true)
+            .default_headers(headers)
+            .cookie_store(true)
+            .build()
+    }
+
+    pub fn get_counts(&mut self, fw_client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+        let response = {
+            let unparsed_response = fw_client
+                .get(format!("https://www.filmweb.pl/user/{}", self.username))
+                .send()?
+                .text()?;
+            Html::parse_document(unparsed_response.as_str())
+        };
+        let films: u16 = response
             .select(&Selector::parse(".VoteStatsBox").unwrap())
             .next()
             .unwrap()
             .value()
             .attr("data-filmratedcount")
             .unwrap()
-            .parse::<u16>()
-            .unwrap();
-        let serials_count: u16 = user_source
+            .parse::<u16>()?;
+        let serials: u16 = response
             .select(&Selector::parse(".VoteStatsBox").unwrap())
             .next()
             .unwrap()
             .value()
             .attr("data-serialratedcount")
             .unwrap()
-            .parse::<u16>()
-            .unwrap();
-        let want2see_count: u16 = user_source
+            .parse::<u16>()?;
+        let marked_to_see: u16 = response
             .select(&Selector::parse(".VoteStatsBox").unwrap())
             .next()
             .unwrap()
             .value()
             .attr("data-filmw2scount")
             .unwrap()
-            .parse::<u16>()
-            .unwrap();
-        Ok((film_count, serials_count, want2see_count))
+            .parse::<u16>()?;
+        self.titles_count = Some(TitlesCount {
+            films,
+            serials,
+            marked_to_see,
+        });
+        Ok(())
     }
 }
+
+impl TitlesCount {}
 
 impl FwPage {
     #[must_use]
@@ -202,30 +231,66 @@ impl FwPage {
         Ok(filmweb_user)
     }
 
-    pub fn scrape_from_page(&mut self, fw_client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn scrape_from_page(&mut self, fw_client: &Client) -> Result<(), FwErrors> {
+        assert!(self.page_source.contains("preview__alternateTitle"));
+        assert!(self.page_source.contains("preview__year"));
+        assert!(self.page_source.contains("preview__link"));
         let html = Html::parse_document(&self.page_source);
         for votebox in html.select(&Selector::parse("div.myVoteBox").unwrap()) {
-            let title_id = votebox
-                .select(&Selector::parse(".previewFilm").unwrap())
-                .next()
-                .unwrap()
-                .value()
-                .attr("data-film-id")
-                .unwrap();
-            let year = votebox
-                .select(&Selector::parse(".preview__year").unwrap())
-                .next()
-                .unwrap()
-                .inner_html();
-            let title_pl = votebox
+            let fw_title_id = {
+                let fw_title_id = votebox
+                    .select(&Selector::parse(".previewFilm").unwrap())
+                    .next()
+                    .unwrap()
+                    .value()
+                    .attr("data-film-id")
+                    .unwrap();
+                fw_title_id.trim().parse::<u32>().unwrap()
+            };
+
+            let year = {
+                let year = votebox
+                    .select(&Selector::parse(".preview__year").unwrap())
+                    .next()
+                    .unwrap()
+                    .inner_html();
+                // Parse year properly, set it to Year::Range if year is in a format for example, 2015-2019
+                // It's used in serials only
+                if year.contains('-') {
+                    let years = year.trim().split('-').collect::<Vec<&str>>();
+                    let year_start = years[0]
+                        .trim()
+                        .parse::<u16>()
+                        .expect("Failed to parse a year from a serial votebox");
+                    let year_end = match years[1].trim().parse::<u16>() {
+                        Ok(year) => year,
+                        Err(_) => year_start,
+                    };
+                    Year::Range(year_start, year_end)
+                } else {
+                    match year.trim().parse::<u16>() {
+                        Ok(year) => Year::OneYear(year),
+                        Err(_) => {
+                            return Err(FwErrors::InvalidYear {
+                                title_id: fw_title_id,
+                                failed_year: year,
+                            })
+                        }
+                    }
+                }
+            };
+
+            let fw_title_pl = votebox
                 .select(&Selector::parse(".preview__link").unwrap())
                 .next()
                 .unwrap()
                 .inner_html();
-            let title = votebox
-                .select(&Selector::parse(".preview__originalTitle").unwrap())
+
+            let fw_title_orig = votebox
+                .select(&Selector::parse(".preview__alternateTitle").unwrap())
                 .next()
                 .map(|element| element.inner_html());
+
             let url: String = format!(
                 "https://filmweb.pl{}",
                 votebox
@@ -236,56 +301,44 @@ impl FwPage {
                     .attr("href")
                     .unwrap()
             );
-            let api_response = match self.page_type {
-                FwPageNumber::Films(_) => Some(
-                    fw_client
-                        .get(format!(
-                            "https://www.filmweb.pl/api/v1/logged/vote/film/{}/details",
-                            title_id
-                        ))
-                        .send(),
-                ),
-                FwPageNumber::Serials(_) => Some(
-                    fw_client
-                        .get(format!(
-                            "https://www.filmweb.pl/api/v1/logged/vote/serial/{}/details",
-                            title_id
-                        ))
-                        .send(),
-                ),
-                FwPageNumber::WantsToSee(_) => None,
-            };
 
-            // JWT could be invalidated meanwhile
-            let rating: Option<FwApiDetails> = match api_response {
-                Some(response) => match response?.json() {
-                    Ok(v) => v,
-                    Err(_) => return Err(Box::new(FwErrors::InvalidJwt)),
-                },
-                None => None,
-            };
-
-            // Parse year properly, set it to Year::Range if year is in a format for example, 2015-2019
-            // It's used in serials mostly
-            let year = if year.contains('-') {
-                let years = year.trim().split('-').collect::<Vec<&str>>();
-                let year_start = years[0]
-                    .trim()
-                    .parse::<u16>()
-                    .expect("Failed to parse a year from a serial votebox");
-                let year_end = match years[1].trim().parse::<u16>() {
-                    Ok(year) => year,
-                    Err(_) => year_start,
+            let rating: Option<FwApiDetails> = {
+                let api_response = match self.page_type {
+                    FwPageNumber::Films(_) => Some(
+                        fw_client
+                            .get(format!(
+                                "https://www.filmweb.pl/api/v1/logged/vote/film/{}/details",
+                                fw_title_id
+                            ))
+                            .send(),
+                    ),
+                    FwPageNumber::Serials(_) => Some(
+                        fw_client
+                            .get(format!(
+                                "https://www.filmweb.pl/api/v1/logged/vote/serial/{}/details",
+                                fw_title_id
+                            ))
+                            .send(),
+                    ),
+                    FwPageNumber::WantsToSee(_) => None,
                 };
-                Year::Range(year_start, year_end)
-            } else {
-                Year::OneYear(year.trim().parse::<u16>()?)
+
+                // JWT could be invalidated meanwhile
+                match api_response {
+                    Some(response) => match response.unwrap().json() {
+                        Ok(v) => v,
+                        Err(_) => return Err(FwErrors::InvalidJwt),
+                    },
+                    None => None,
+                }
             };
 
-            let duration = {
-                let response = fw_client.get(&url).send()?.text()?;
-                let response = Html::parse_document(response.as_str());
-                match response
+            let fw_duration = {
+                let document = {
+                    let response = fw_client.get(&url).send().unwrap().text().unwrap();
+                    Html::parse_document(response.as_str())
+                };
+                match document
                     .select(&Selector::parse(".filmCoverSection__duration").unwrap())
                     .next()
                     .unwrap()
@@ -301,11 +354,11 @@ impl FwPage {
 
             self.rated_titles.push(FwRatedTitle {
                 fw_url: url.clone(),
-                fw_title_id: title_id.trim().parse::<u32>()?,
-                fw_title_pl: title_pl,
-                fw_title_orig: title,
+                fw_title_id,
+                fw_title_pl,
+                fw_title_orig,
                 title_type: self.page_type.into(),
-                fw_duration: duration,
+                fw_duration,
                 year,
                 rating,
                 imdb_data: None,
@@ -357,18 +410,24 @@ impl FwRatedTitle {
                     Ok(api) => Some(api),
                     Err(_) => match self.get_imdb_data(&self.fw_title_pl, year, imdb_client) {
                         Ok(api) => Some(api),
-                        Err(_) => None,
+                        Err(_) => match self.get_imdb_data(title, year, imdb_client) {
+                            Ok(api) => Some(api),
+                            Err(_) => None,
+                        },
                     },
                 },
             },
-            None => match self.get_imdb_data_advanced(&self.fw_title_pl, year, year, imdb_client) {
-                Ok(api) => Some(api),
-                Err(_) => match self.get_imdb_data(&self.fw_title_pl, year, imdb_client) {
+            None => {
+                log::info!("{} doesn't contain original title", self.fw_title_pl);
+                match self.get_imdb_data_advanced(&self.fw_title_pl, year, year, imdb_client) {
                     Ok(api) => Some(api),
-                    Err(_) => None,
-                },
-            },
-        };
+                    Err(_) => match self.get_imdb_data(&self.fw_title_pl, year, imdb_client) {
+                        Ok(api) => Some(api),
+                        Err(_) => None,
+                    },
+                }
+            }
+        }
     }
 
     pub fn get_imdb_data_advanced(
@@ -377,46 +436,61 @@ impl FwRatedTitle {
         year_start: u16,
         year_end: u16,
         imdb_client: &Client,
-    ) -> Result<IMDbApiDetails, Box<FwErrors>> {
+    ) -> Result<IMDbApiDetails, Box<dyn std::error::Error>> {
         let url = format!(
             "https://www.imdb.com/search/title/?title={}&release_date={},{}&adult=include",
             title, year_start, year_end
         );
-        let response = imdb_client.get(url).send().unwrap().text().unwrap();
-        let response = Html::parse_document(response.as_str());
-        let title_data = match response
+
+        let document = {
+            let response = imdb_client.get(&url).send()?.text()?;
+            Html::parse_document(response.as_str())
+        };
+
+        let title_data = match document
             .select(&Selector::parse("div.lister-item-image").unwrap())
             .next()
         {
             Some(id) => id,
-            None => return Err(Box::new(FwErrors::ZeroResults)),
+            None => {
+                log::error!("Failed to get a match in Fn get_imdb_data_advanced for {title} {year_start} on {url}");
+                return Err(Box::new(FwErrors::ZeroResults));
+            }
         };
-        let title_id = title_data.inner_html();
-        let imdb_title = response
+
+        let title_id = {
+            let id = title_data.inner_html();
+            let regex = Regex::new(r"(\d{7,8})").unwrap();
+            format!("{:08}", regex.captures(id.as_str()).unwrap().get(0).unwrap().as_str())
+        };
+        log::debug!("Found a potential IMDb id for {title} {year_start} on {url}");
+
+        let imdb_title = document
             .select(&Selector::parse("img.loadlate").unwrap())
             .next()
             .unwrap()
             .value()
             .attr("alt")
             .unwrap();
-        let re = Regex::new(r"(\d{7,8})").unwrap();
-        let title_id = format!(
-            "{:08}",
-            re.captures(title_id.as_str()).unwrap().get(0).unwrap().as_str()
-        );
 
         let duration = {
-            let x = match response.select(&Selector::parse(".runtime").unwrap()).next() {
+            let x = match document.select(&Selector::parse(".runtime").unwrap()).next() {
                 Some(a) => a.inner_html().replace(" min", ""),
-                None => return Err(Box::new(FwErrors::InvalidDuration)),
+                None => {
+                    log::error!("Failed to fetch duration for {title} {year_start} on {url}");
+                    return Err(Box::new(FwErrors::InvalidDuration));
+                }
             };
             match x.parse::<u32>() {
                 Ok(x) => x,
-                Err(_) => return Err(Box::new(FwErrors::InvalidDuration)),
+                Err(_) => {
+                    log::error!("Failed parsing duration to int for {title} {year_start} on {url}");
+                    return Err(Box::new(FwErrors::InvalidDuration));
+                }
             }
         };
         let imdb_data = IMDbApiDetails {
-            id: title_id.trim().parse::<u32>().unwrap().to_string(),
+            id: title_id.trim().parse::<u32>()?.to_string(),
             title: imdb_title.to_string(),
             duration,
         };
@@ -430,70 +504,76 @@ impl FwRatedTitle {
         year: u16,
         imdb_client: &Client,
     ) -> Result<IMDbApiDetails, Box<dyn std::error::Error>> {
-        let url = format!("https://www.imdb.com/find?q={}+{}", title, year);
-        let response = imdb_client.get(url).send().unwrap().text().unwrap();
-        let response_parsed = Html::parse_document(response.as_str());
-        let imdb_title = match response_parsed
-            .select(&Selector::parse(".result_text a").unwrap())
-            .next()
-        {
-            None => return Err(Box::new(FwErrors::ZeroResults)),
+        let url_query = format!("https://www.imdb.com/find?q={}+{}", title, year);
+        let document = {
+            let response = imdb_client.get(&url_query).send()?.text()?;
+            Html::parse_document(response.as_str())
+        };
+        let imdb_title = match document.select(&Selector::parse(".result_text a").unwrap()).next() {
             Some(title) => title.inner_html(),
+            None => {
+                log::error!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
+                return Err(Box::new(FwErrors::ZeroResults));
+            }
         };
-        let title_id = match response_parsed.select(&Selector::parse(".result_text").unwrap()).next() {
-            Some(id) => id,
-            None => return Err(Box::new(FwErrors::ZeroResults)),
-        };
-        // get url of a title, and grab the duration
-        let url_suffix = response_parsed
-            .select(&Selector::parse("td.result_text a").unwrap())
-            .next()
-            .unwrap()
-            .value()
-            .attr("href")
-            .unwrap();
-        let full_url = format!("https://www.imdb.com{}", url_suffix);
-        let response = imdb_client.get(full_url).send().unwrap().text().unwrap();
-        let response_parsed = Html::parse_document(response.as_str());
 
-        let get_duration = |nth| {
-            response_parsed
+        let title_id = match document.select(&Selector::parse(".result_text").unwrap()).next() {
+            Some(id) => id,
+            None => {
+                log::error!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
+                return Err(Box::new(FwErrors::ZeroResults));
+            }
+        };
+
+        // get url of a title, and grab the duration
+        let url = {
+            let url_suffix = document
+                .select(&Selector::parse("td.result_text a").unwrap())
+                .next()
+                .unwrap()
+                .value()
+                .attr("href")
+                .unwrap();
+            format!("https://www.imdb.com{}", url_suffix)
+        };
+
+        let document = {
+            let response = imdb_client.get(&url).send()?.text()?;
+            Html::parse_document(response.as_str())
+        };
+
+        let get_dirty_duration = |nth| {
+            document
                 .select(&Selector::parse(".ipc-inline-list__item").unwrap())
                 .nth(nth)
                 .expect("Panic occured while trying to export {title} {year}")
                 .inner_html()
         };
 
-        let mut dirty_duration = get_duration(5);
+        let mut dirty_duration = get_dirty_duration(5);
         if dirty_duration.contains("Unrated") || dirty_duration.contains("Not Rated") || dirty_duration.contains("TV") {
-            dirty_duration = get_duration(6);
+            dirty_duration = get_dirty_duration(6);
         }
 
         if dirty_duration.len() > 40 {
+            log::error!("Invalid duration in Fn get_imdb_data on {url} for {title} {year} source: {url_query}");
             return Err(Box::new(FwErrors::InvalidDuration));
         }
 
+        // Example of dirty_duration: 1<!-- -->h<!-- --> <!-- -->33<!-- -->m<
         let duration = {
-            let mut duration;
-            let mut dirty_duration = dirty_duration.replace("<!---->", "");
-            if dirty_duration.contains('h') {
-                let mut dirty_duration = dirty_duration.replace(' ', "");
-                duration = dirty_duration
-                    .chars()
-                    .next()
-                    .expect("Handling duration failed")
-                    .to_digit(10)
-                    .expect("Conversion to int failed")
-                    * 60;
-                dirty_duration.remove(0);
-                dirty_duration.retain(|c| c.is_ascii_digit());
-                duration += dirty_duration.parse::<u32>().unwrap_or(0);
+            let dirty_duration: Vec<u32> = dirty_duration
+                .replace("<!-- -->", " ")
+                .split_whitespace()
+                .filter_map(|s| s.parse::<u32>().ok())
+                .collect();
+            if dirty_duration.len() >= 2 {
+                dirty_duration[0] * 60 + dirty_duration[1]
             } else {
-                dirty_duration.retain(|c| c.is_ascii_digit());
-                duration = dirty_duration.parse::<u32>().unwrap();
+                dirty_duration[0]
             }
-            duration
         };
+        log::debug!("Found duration {duration}m for {title} {year}");
 
         let title_id = title_id.inner_html();
         let re = Regex::new(r"(\d{7,8})").unwrap();
@@ -532,7 +612,13 @@ impl FwRatedTitle {
             Year::OneYear(year) | Year::Range(year, _) => year.to_string(),
         };
 
-        let mut fields = ["", "", "", "", "", "", "", "", "", "", "", "", ""];
+        log::debug!(
+            "Exporting to CSV title: {}, rating: {}, imdb_id: {}",
+            title,
+            rating,
+            imdb_id
+        );
+        let mut fields = [""; 13];
         fields[0] = imdb_id;
         fields[1] = rating.as_ref();
         fields[3] = title.as_ref();
@@ -555,26 +641,8 @@ impl FwRatedTitle {
     }
 }
 
-pub fn filmweb_client_builder(user: &FwUser) -> Result<Client, reqwest::Error> {
-    let cookies = format!(
-        "_fwuser_token={}; _fwuser_sessionId={}; JWT={};",
-        user.token, user.session, user.jwt
-    );
-
-    let mut headers = header::HeaderMap::new();
-    headers.insert(header::COOKIE, header::HeaderValue::from_str(&cookies).unwrap());
-    headers.insert(header::CONNECTION, header::HeaderValue::from_static("keep-alive"));
-    headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("gzip"));
-
-    Client::builder()
-        .user_agent(USER_AGENT)
-        .gzip(true)
-        .default_headers(headers)
-        .cookie_store(true)
-        .build()
-}
-
 pub fn imdb_client_builder() -> Result<Client, reqwest::Error> {
+    log::debug!("Creating IMDb Client");
     let mut headers = header::HeaderMap::new();
     headers.insert(header::CONNECTION, header::HeaderValue::from_static("keep-alive"));
     headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("gzip"));
@@ -589,7 +657,7 @@ pub fn imdb_client_builder() -> Result<Client, reqwest::Error> {
 
 impl ExportFiles {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, std::io::Error> {
         let write_header = |wtr| -> Writer<File> {
             let mut wtr: Writer<File> = csv::Writer::from_writer(wtr);
             wtr.write_record(&[
@@ -616,22 +684,22 @@ impl ExportFiles {
                 _ => panic!("{}", e),
             }
         };
-        let generic = File::create("exports/generic.csv").unwrap();
-        let want2see = File::create("exports/want2see.csv").unwrap();
-        let favorited = File::create("exports/favorited.csv").unwrap();
+        let generic = File::create("exports/generic.csv")?;
+        let want2see = File::create("exports/want2see.csv")?;
+        let favorited = File::create("exports/favorited.csv")?;
         let generic = write_header(generic);
         let want2see = write_header(want2see);
         let favorited = write_header(favorited);
-        Self {
+        Ok(Self {
             generic,
             want2see,
             favorited,
-        }
+        })
     }
 }
 
 impl Default for ExportFiles {
     fn default() -> Self {
-        Self::new()
+        Self::new().unwrap()
     }
 }
