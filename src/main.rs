@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
+use lazy_static::lazy_static;
 use reqwest::blocking::Client;
 use std::io::stdin;
 use std::sync::{Arc, Mutex};
@@ -32,29 +33,64 @@ struct Args {
     jwt: String,
 
     /// Number of threads to spawn
-    #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u8).range(1..8))]
+    #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u8).range(1..7))]
     threads: u8,
+
+    /// If enabled, successfully exported titles won't be printed
+    #[arg(short, long, value_parser, default_value_t = false)]
+    quiet: bool,
+}
+
+struct ClientPool {
+    clients: Vec<Client>,
+}
+
+impl ClientPool {
+    fn get_a_client(&self, i: u8) -> &Client {
+        &self.clients[(i % self.clients.len() as u8) as usize]
+    }
+
+    fn new(client_sample: Client, amount: u8) -> ClientPool {
+        let mut clients = Vec::new();
+        for _ in 0..amount {
+            clients.push(client_sample.clone())
+        }
+
+        ClientPool { clients }
+    }
+}
+
+lazy_static! {
+    static ref ARGS: Args = Args::parse();
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    // let ARGS = Args::parse();
+    println!("{}", ARGS.quiet);
     println!("{}", "filmweb-export starting...".yellow());
 
     let mut export_files = ExportFiles::default();
-    let mut user = FwUser::new(args.username, args.token, args.session, args.jwt);
+    let mut user = FwUser::new(
+        ARGS.username.clone(),
+        ARGS.token.clone(),
+        ARGS.session.clone(),
+        ARGS.jwt.clone(),
+    );
     let fw_client = user.filmweb_client_builder()?;
+    let fw_client_pool = ClientPool::new(fw_client, 3);
 
     let imdb_client = imdb_client_builder()?;
+    let imdb_client_pool = ClientPool::new(imdb_client, 3);
 
     // Get count of rated films, and convert it to number of pages
-    user.get_counts(&fw_client).unwrap();
+    user.get_counts(fw_client_pool.get_a_client(1)).unwrap();
     let titles_counts = user.titles_count.unwrap(); // if above line executed, it won't panic
     let films_pages = (titles_counts.films / 25 + 1) as u8;
     let serials_pages = (titles_counts.serials / 25 + 1) as u8;
     let wants2see_pages = (titles_counts.marked_to_see / 25 + 1) as u8;
-    let exported_pages: Arc<Arc<Mutex<Vec<FwPage>>>> = Arc::new(Arc::new(Mutex::new(Vec::with_capacity(
+    let exported_pages: Arc<Mutex<Vec<FwPage>>> = Arc::new(Mutex::new(Vec::with_capacity(
         (films_pages + serials_pages + wants2see_pages) as usize,
-    ))));
+    )));
 
     // Scraping actual data from Filmweb
     for (pages_count, page_type) in [
@@ -66,14 +102,14 @@ fn main() -> Result<()> {
             pages_count,
             &user,
             page_type,
-            &fw_client,
+            &fw_client_pool,
             &Arc::clone(&exported_pages),
-            args.threads,
+            ARGS.threads,
         )
         .unwrap();
     }
 
-    fetch_imdb_data(&Arc::clone(&exported_pages), &imdb_client, args.threads);
+    fetch_imdb_data(&Arc::clone(&exported_pages), &imdb_client_pool, ARGS.threads);
 
     // Check for possible false errors (in duration comparison only for now), and let the user
     // decide if it's a good match
@@ -82,7 +118,12 @@ fn main() -> Result<()> {
             if let Some(ref imdb_data) = title.imdb_data {
                 if !title.is_duration_ok() {
                     let url = format!("https://www.imdb.com/title/tt{}", imdb_data.id);
-                    print!("Is {} a good match for {}? (y/n): ", url, title.fw_title_pl);
+                    print!(
+                        "{} Is {} a good match for {}? (y/N): ",
+                        "[?]".blue(),
+                        url,
+                        title.fw_title_pl
+                    );
                     std::io::stdout().flush()?;
                     let mut decision = String::new();
                     stdin().read_line(&mut decision).expect("Invalid input");
@@ -107,7 +148,7 @@ fn scrape_fw(
     total_pages: u8,
     user: &FwUser,
     page_type: FwTitleType,
-    fw_client: &Client,
+    clientpool: &ClientPool,
     pages: &Arc<Mutex<Vec<FwPage>>>,
     threads: u8,
 ) -> Result<()> {
@@ -132,8 +173,8 @@ fn scrape_fw(
                     FwTitleType::Serial => FwPageNumber::Serials(i),
                     FwTitleType::WantsToSee => FwPageNumber::WantsToSee(i),
                 };
-                let mut fw_page = FwPage::new(page_type, user, fw_client);
-                if let Err(e) = fw_page.scrape_from_page(fw_client) {
+                let mut fw_page = FwPage::new(page_type, user, clientpool.get_a_client(i));
+                if let Err(e) = fw_page.scrape_from_page(clientpool.get_a_client(i)) {
                     match e {
                         FwErrors::InvalidJwt => {
                             eprintln!(
@@ -147,7 +188,7 @@ fn scrape_fw(
                             eprintln!("{} {}", "Couldn't parse a year for title with id".red(), title_id);
                             eprintln!("{} {}", "String that failed to parse:".blue(), failed_year);
                             *error_happened_clone.lock().unwrap() = true;
-                            std::process::exit(1)
+                            *error_happened_clone.lock().unwrap() = true;
                         }
                         _ => unreachable!(),
                     }
@@ -167,17 +208,17 @@ fn scrape_fw(
     Ok(())
 }
 
-fn fetch_imdb_data(pages: &Arc<Mutex<Vec<FwPage>>>, imdb_client: &Client, threads: u8) {
+fn fetch_imdb_data(pages: &Arc<Mutex<Vec<FwPage>>>, imdb_client: &ClientPool, threads: u8) {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads as usize)
         .build()
         .unwrap();
     let pages_iter = &mut *pages.lock().unwrap();
     pool.scope(|s| {
-        for page in &mut *pages_iter {
+        for (i, page) in pages_iter.iter_mut().enumerate() {
             s.spawn(move |_| {
                 for title in &mut page.rated_titles {
-                    title.get_imdb_data_logic(imdb_client);
+                    title.get_imdb_data_logic(imdb_client.get_a_client(i as u8));
                     print_title(title);
                 }
             })
@@ -198,15 +239,20 @@ fn print_failed(pages: &Arc<Mutex<Vec<FwPage>>>) {
 
 fn print_title(title: &FwRatedTitle) {
     // Prints a rating with, or without a heart (if a title is favorited or not)
+    // let print_rating = || match &title.rating.as_ref() {
+    //     Some(api) => {
+    //         if api.favorite {
+    //             format!("{}/10 ♥", api.rate).red()
+    //         } else {
+    //             format!("{}/10", api.rate).normal()
+    //         }
+    //     }
+    //     None => "".to_string().normal(),
+    // };
     let print_rating = || match &title.rating.as_ref() {
-        Some(api) => {
-            if api.favorite {
-                format!("{}/10 ♥", api.rate).red()
-            } else {
-                format!("{}/10", api.rate).normal()
-            }
-        }
-        None => "".to_string().normal(),
+        Some(api) if api.favorite => format!("{}/10 ♥", api.rate).red(),
+        Some(api) => format!("{}/10", api.rate).normal(),
+        _ => "".to_string().normal(),
     };
 
     let print_not_found = || {
@@ -225,11 +271,10 @@ fn print_title(title: &FwRatedTitle) {
         );
     };
 
-    match &title.imdb_data {
-        Some(data) => match data.id.as_str() {
-            "not-found" => print_not_found(),
-            _ => print_found(data),
-        },
-        None => print_not_found(),
+    match title.imdb_data {
+        Some(ref data) if data.id.as_str() != "not-found" && !ARGS.quiet => print_found(&data),
+        Some(ref data) if data.id.as_str() != "not-found" && ARGS.quiet => (),
+        Some(ref data) if data.id.as_str() == "not-found" => print_not_found(),
+        _ => print_not_found(),
     }
 }

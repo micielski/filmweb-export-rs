@@ -1,4 +1,5 @@
 use csv::Writer;
+use priority_queue::PriorityQueue;
 use regex::Regex;
 use reqwest::blocking::Client;
 use reqwest::header;
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, fs::File};
 use thiserror::Error;
 
-const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux i686; rv:101.0) Gecko/20100101 Firefox/101.0";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/106.0";
 
 #[derive(Error, Debug)]
 pub enum FwErrors {
@@ -87,14 +88,20 @@ pub struct IMDbApiDetails {
 #[derive(Debug)]
 pub struct FwRatedTitle {
     pub fw_url: String,
-    pub fw_title_id: u32,
+    pub fw_id: u32,
     pub fw_title_pl: String,
-    pub fw_title_orig: Option<String>,
+    pub fw_alter_titles: Option<PriorityQueue<AlternateTitle, u8>>,
     pub title_type: FwTitleType,
     pub fw_duration: Option<u16>, // time in minutes
     pub year: Year,
     pub rating: Option<FwApiDetails>,
     pub imdb_data: Option<IMDbApiDetails>,
+}
+
+#[derive(Debug, Hash, Eq, PartialEq)]
+pub struct AlternateTitle {
+    pub language: String,
+    pub title: String,
 }
 
 #[derive(Debug)]
@@ -147,7 +154,7 @@ impl FwUser {
                 .get(format!("https://www.filmweb.pl/user/{}", self.username))
                 .send()?
                 .text()?;
-            Html::parse_document(unparsed_response.as_str())
+            Html::parse_document(&unparsed_response)
         };
         let films: u16 = response
             .select(&Selector::parse(".VoteStatsBox").unwrap())
@@ -181,8 +188,6 @@ impl FwUser {
         Ok(())
     }
 }
-
-impl TitlesCount {}
 
 impl FwPage {
     #[must_use]
@@ -286,12 +291,7 @@ impl FwPage {
                 .unwrap()
                 .inner_html();
 
-            let fw_title_orig = votebox
-                .select(&Selector::parse(".preview__alternateTitle").unwrap())
-                .next()
-                .map(|element| element.inner_html());
-
-            let url: String = format!(
+            let title_url: String = format!(
                 "https://filmweb.pl{}",
                 votebox
                     .select(&Selector::parse(".preview__link").unwrap())
@@ -301,6 +301,8 @@ impl FwPage {
                     .attr("href")
                     .unwrap()
             );
+
+            let alternate_titles_url = format!("{}/titles", title_url);
 
             let rating: Option<FwApiDetails> = {
                 let api_response = match self.page_type {
@@ -335,8 +337,8 @@ impl FwPage {
 
             let fw_duration = {
                 let document = {
-                    let response = fw_client.get(&url).send().unwrap().text().unwrap();
-                    Html::parse_document(response.as_str())
+                    let response = fw_client.get(&title_url).send().unwrap().text().unwrap();
+                    Html::parse_document(&response)
                 };
                 match document
                     .select(&Selector::parse(".filmCoverSection__duration").unwrap())
@@ -351,12 +353,11 @@ impl FwPage {
                     Err(_) => None,
                 }
             };
-
             self.rated_titles.push(FwRatedTitle {
-                fw_url: url.clone(),
-                fw_title_id,
+                fw_url: title_url.clone(),
+                fw_id: fw_title_id,
                 fw_title_pl,
-                fw_title_orig,
+                fw_alter_titles: Some(AlternateTitle::fw_get_titles(&alternate_titles_url, fw_client)),
                 title_type: self.page_type.into(),
                 fw_duration,
                 year,
@@ -403,28 +404,23 @@ impl FwRatedTitle {
         let year = match self.year {
             Year::OneYear(year) | Year::Range(year, _) => year,
         };
-        self.imdb_data = match &self.fw_title_orig {
-            Some(title) => match self.get_imdb_data_advanced(title, year, year, imdb_client) {
-                Ok(api) => Some(api),
-                Err(_) => match self.get_imdb_data_advanced(&self.fw_title_pl, year, year, imdb_client) {
-                    Ok(api) => Some(api),
-                    Err(_) => match self.get_imdb_data(&self.fw_title_pl, year, imdb_client) {
-                        Ok(api) => Some(api),
-                        Err(_) => match self.get_imdb_data(title, year, imdb_client) {
-                            Ok(api) => Some(api),
-                            Err(_) => None,
-                        },
-                    },
-                },
-            },
-            None => {
-                log::info!("{} doesn't contain original title", self.fw_title_pl);
-                match self.get_imdb_data_advanced(&self.fw_title_pl, year, year, imdb_client) {
-                    Ok(api) => Some(api),
-                    Err(_) => match self.get_imdb_data(&self.fw_title_pl, year, imdb_client) {
-                        Ok(api) => Some(api),
-                        Err(_) => None,
-                    },
+
+        'main: while let Some((ref alternate_title, score)) = self.fw_alter_titles.as_mut().unwrap().pop() {
+            if score == u8::MIN {
+                break;
+            }
+            for i in 1..=2 {
+                if i % 2 == 1 {
+                    if let Ok(imdb_data) = self.get_imdb_data_advanced(&alternate_title.title, year, year, imdb_client)
+                    {
+                        self.imdb_data = Some(imdb_data);
+                        break 'main;
+                    }
+                } else {
+                    if let Ok(imdb_data) = self.get_imdb_data(&alternate_title.title, year, imdb_client) {
+                        self.imdb_data = Some(imdb_data);
+                        break 'main;
+                    }
                 }
             }
         }
@@ -444,7 +440,7 @@ impl FwRatedTitle {
 
         let document = {
             let response = imdb_client.get(&url).send()?.text()?;
-            Html::parse_document(response.as_str())
+            Html::parse_document(&response)
         };
 
         let title_data = match document
@@ -461,7 +457,9 @@ impl FwRatedTitle {
         let title_id = {
             let id = title_data.inner_html();
             let regex = Regex::new(r"(\d{7,8})").unwrap();
-            format!("{:08}", regex.captures(id.as_str()).unwrap().get(0).unwrap().as_str())
+            format!("{:0>7}", regex.captures(&id).unwrap().get(0).unwrap().as_str())
+                .trim()
+                .to_string()
         };
         log::debug!("Found a potential IMDb id for {title} {year_start} on {url}");
 
@@ -490,7 +488,7 @@ impl FwRatedTitle {
             }
         };
         let imdb_data = IMDbApiDetails {
-            id: title_id.trim().parse::<u32>()?.to_string(),
+            id: title_id,
             title: imdb_title.to_string(),
             duration,
         };
@@ -507,7 +505,7 @@ impl FwRatedTitle {
         let url_query = format!("https://www.imdb.com/find?q={}+{}", title, year);
         let document = {
             let response = imdb_client.get(&url_query).send()?.text()?;
-            Html::parse_document(response.as_str())
+            Html::parse_document(&response)
         };
         let imdb_title = match document.select(&Selector::parse(".result_text a").unwrap()).next() {
             Some(title) => title.inner_html(),
@@ -539,7 +537,7 @@ impl FwRatedTitle {
 
         let document = {
             let response = imdb_client.get(&url).send()?.text()?;
-            Html::parse_document(response.as_str())
+            Html::parse_document(&response)
         };
 
         let get_dirty_duration = |nth| {
@@ -592,7 +590,15 @@ impl FwRatedTitle {
     }
 
     pub fn export_csv(&self, files: &mut ExportFiles) {
-        let title = self.fw_title_orig.as_ref().unwrap_or(&self.fw_title_pl);
+        let title = {
+            match self.fw_alter_titles {
+                Some(ref alter_titles) => match alter_titles.peek() {
+                    Some(alter_title) => &alter_title.0.title,
+                    None => &self.fw_title_pl,
+                },
+                None => &self.fw_title_pl,
+            }
+        };
 
         let rating = self
             .rating
@@ -698,8 +704,112 @@ impl ExportFiles {
     }
 }
 
+impl AlternateTitle {
+    pub fn score_title(language: &str) -> u8 {
+        if language.contains("USA") || language.contains("angielski") {
+            10
+        } else if language.contains("oryginalny") {
+            9
+        } else if language.contains("główny") {
+            8
+        } else if language.contains("alternatywna pisownia") {
+            7
+        } else if language.contains("inny tytuł") {
+            6
+        } else if language.contains("Polska") {
+            5
+        } else {
+            u8::MIN
+        }
+    }
+
+    pub fn fw_get_titles(url: &str, client: &Client) -> PriorityQueue<AlternateTitle, u8> {
+        let response = client.get(url).send().unwrap().text().unwrap();
+        let document = Html::parse_document(&response);
+        let select_titles = Selector::parse(".filmTitlesSection__title").unwrap();
+        let select_language = Selector::parse(".filmTitlesSection__desc").unwrap();
+        let mut titles = PriorityQueue::new();
+        document
+            .select(&select_titles)
+            .into_iter()
+            .zip(document.select(&select_language))
+            .for_each(|(title, language)| {
+                let title = title.inner_html();
+                let language = language.inner_html();
+                let score = AlternateTitle::score_title(&language);
+                titles.push(AlternateTitle { language, title }, score);
+            });
+        titles
+    }
+}
+
 impl Default for ExportFiles {
     fn default() -> Self {
         Self::new().unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn scraping_alternative_titles() {
+        let client = Client::builder().user_agent(USER_AGENT).gzip(true).build().unwrap();
+        let mut expected_titles = PriorityQueue::new();
+        [
+            ("South Park", "USA (Tytuł oryginalny)"),
+            ("Městečko South Park", "Czechy"),
+            (
+                "South Park",
+                "USA (Tytuł oryginalny) / Argentyna / Hiszpania / Francja / Węgry / Polska (tytuł telewizyjny)",
+            ),
+            ("Pietu parkas", "Litwa"),
+            ("Miasteczko South Park", "Polska (tytuł główny)"),
+            ("Mestečko South Park", "Słowacja"),
+            ("Saut Park", "Serbia"),
+        ]
+        .iter()
+        .for_each(|(title, language)| {
+            expected_titles.push(
+                AlternateTitle {
+                    title: title.to_string(),
+                    language: language.to_string(),
+                },
+                AlternateTitle::score_title(&language),
+            );
+        });
+        let alternate_titles = AlternateTitle::fw_get_titles(
+            "https://www.filmweb.pl/serial/Miasteczko+South+Park-1997-94331/titles",
+            &client,
+        );
+
+        assert_eq!(expected_titles.len(), alternate_titles.len())
+    }
+
+    #[test]
+    fn alternative_titles_priorityqueue_ordering() {
+        let mut expected_titles = PriorityQueue::new();
+        [
+            ("Title", "USA"),
+            ("Los Titulos", "tytuł oryginalny"),
+            ("The Title", "tytuł główny"),
+            ("Titles", "alternatywna pisownia"),
+            ("Tytuł", "Polska"),
+            ("Titulo", "Hiszpański"),
+            ("标题", "Chiński"),
+        ]
+        .iter()
+        .for_each(|(title, language)| {
+            expected_titles.push(
+                AlternateTitle {
+                    title: title.to_string(),
+                    language: language.to_string(),
+                },
+                AlternateTitle::score_title(&language),
+            );
+        });
+        assert_eq!("USA", expected_titles.pop().unwrap().0.language);
+        assert_eq!("tytuł oryginalny", expected_titles.pop().unwrap().0.language);
+        assert_eq!("tytuł główny", expected_titles.pop().unwrap().0.language);
     }
 }
