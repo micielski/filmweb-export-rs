@@ -20,6 +20,8 @@ pub enum FwErrors {
     InvalidJwt,
     #[error("year parsing error")]
     InvalidYear { title_id: u32, failed_year: String },
+    #[error("invalid credentials")]
+    InvalidCredentials,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -119,7 +121,7 @@ pub struct ExportFiles {
 
 impl FwUser {
     #[must_use]
-    pub fn new(username: String, token: String, session: String, jwt: String) -> Self {
+    pub const fn new(username: String, token: String, session: String, jwt: String) -> Self {
         Self {
             username,
             token,
@@ -128,11 +130,32 @@ impl FwUser {
             titles_count: None,
         }
     }
-    pub fn filmweb_client_builder(&self) -> Result<Client, reqwest::Error> {
+
+    pub fn get_username(fw_client: &Client) -> Result<String, FwErrors> {
+        let res = fw_client
+            .get("https://www.filmweb.pl/settings")
+            .send()
+            .unwrap()
+            .text()
+            .unwrap();
+        let document = Html::parse_document(&res);
+        let username = match document
+            .select(&Selector::parse(".mainSettings__groupItemStateContent").unwrap())
+            .nth(2)
+        {
+            Some(username_tag) => username_tag.inner_html().trim().to_owned(),
+            None => return Err(FwErrors::InvalidCredentials),
+        };
+        Ok(username)
+    }
+
+    pub fn filmweb_client_builder(token: &str, session: &str, jwt: &str) -> Result<Client, reqwest::Error> {
         log::debug!("Creating Filmweb Client");
         let cookies = format!(
             "_fwuser_token={}; _fwuser_sessionId={}; JWT={};",
-            self.token, self.session, self.jwt
+            token.trim(),
+            session.trim(),
+            jwt.trim()
         );
 
         let mut headers = header::HeaderMap::new();
@@ -337,8 +360,8 @@ impl FwPage {
 
             let fw_duration = {
                 let document = {
-                    let response = fw_client.get(&title_url).send().unwrap().text().unwrap();
-                    Html::parse_document(&response)
+                    let res = fw_client.get(&title_url).send().unwrap().text().unwrap();
+                    Html::parse_document(&res)
                 };
                 match document
                     .select(&Selector::parse(".filmCoverSection__duration").unwrap())
@@ -382,17 +405,14 @@ impl FwRatedTitle {
             Some(duration) => duration,
         };
 
-        let upper;
-        let lower;
         // if true, it's probably a tv show, and they seem to be very different on both sites
         // so let's be less restrictive then
-        if imdb_duration <= 60_f64 && fw_duration <= 60_u16 {
-            upper = imdb_duration * 1.50;
-            lower = imdb_duration * 0.50;
+        let (upper, lower) = if imdb_duration <= 60_f64 && fw_duration <= 60_u16 {
+            (imdb_duration * 1.50, imdb_duration * 0.75)
         } else {
-            upper = imdb_duration * 1.15;
-            lower = imdb_duration * 0.85;
-        }
+            (imdb_duration * 1.15, imdb_duration * 0.85)
+        };
+
         // if imdb duration doesn't fit into fw's then set it to none
         if upper >= fw_duration.into() && lower >= fw_duration.into() {
             return false;
@@ -416,11 +436,9 @@ impl FwRatedTitle {
                         self.imdb_data = Some(imdb_data);
                         break 'main;
                     }
-                } else {
-                    if let Ok(imdb_data) = self.get_imdb_data(&alternate_title.title, year, imdb_client) {
-                        self.imdb_data = Some(imdb_data);
-                        break 'main;
-                    }
+                } else if let Ok(imdb_data) = self.get_imdb_data(&alternate_title.title, year, imdb_client) {
+                    self.imdb_data = Some(imdb_data);
+                    break 'main;
                 }
             }
         }
@@ -443,15 +461,14 @@ impl FwRatedTitle {
             Html::parse_document(&response)
         };
 
-        let title_data = match document
+        let title_data = if let Some(id) = document
             .select(&Selector::parse("div.lister-item-image").unwrap())
             .next()
         {
-            Some(id) => id,
-            None => {
-                log::error!("Failed to get a match in Fn get_imdb_data_advanced for {title} {year_start} on {url}");
-                return Err(Box::new(FwErrors::ZeroResults));
-            }
+            id
+        } else {
+            log::error!("Failed to get a match in Fn get_imdb_data_advanced for {title} {year_start} on {url}");
+            return Err(Box::new(FwErrors::ZeroResults));
         };
 
         let title_id = {
@@ -472,21 +489,21 @@ impl FwRatedTitle {
             .unwrap();
 
         let duration = {
-            let x = match document.select(&Selector::parse(".runtime").unwrap()).next() {
-                Some(a) => a.inner_html().replace(" min", ""),
-                None => {
-                    log::error!("Failed to fetch duration for {title} {year_start} on {url}");
-                    return Err(Box::new(FwErrors::InvalidDuration));
-                }
+            let x = if let Some(a) = document.select(&Selector::parse(".runtime").unwrap()).next() {
+                a.inner_html().replace(" min", "")
+            } else {
+                log::error!("Failed to fetch duration for {title} {year_start} on {url}");
+                return Err(Box::new(FwErrors::InvalidDuration));
             };
-            match x.parse::<u32>() {
-                Ok(x) => x,
-                Err(_) => {
-                    log::error!("Failed parsing duration to int for {title} {year_start} on {url}");
-                    return Err(Box::new(FwErrors::InvalidDuration));
-                }
+
+            if let Ok(x) = x.parse::<u32>() {
+                x
+            } else {
+                log::error!("Failed parsing duration to int for {title} {year_start} on {url}");
+                return Err(Box::new(FwErrors::InvalidDuration));
             }
         };
+
         let imdb_data = IMDbApiDetails {
             id: title_id,
             title: imdb_title.to_string(),
@@ -507,20 +524,19 @@ impl FwRatedTitle {
             let response = imdb_client.get(&url_query).send()?.text()?;
             Html::parse_document(&response)
         };
-        let imdb_title = match document.select(&Selector::parse(".result_text a").unwrap()).next() {
-            Some(title) => title.inner_html(),
-            None => {
-                log::error!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
-                return Err(Box::new(FwErrors::ZeroResults));
-            }
+
+        let imdb_title = if let Some(title) = document.select(&Selector::parse(".result_text a").unwrap()).next() {
+            title.inner_html()
+        } else {
+            log::error!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
+            return Err(Box::new(FwErrors::ZeroResults));
         };
 
-        let title_id = match document.select(&Selector::parse(".result_text").unwrap()).next() {
-            Some(id) => id,
-            None => {
-                log::error!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
-                return Err(Box::new(FwErrors::ZeroResults));
-            }
+        let title_id = if let Some(id) = document.select(&Selector::parse(".result_text").unwrap()).next() {
+            id
+        } else {
+            log::error!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
+            return Err(Box::new(FwErrors::ZeroResults));
         };
 
         // get url of a title, and grab the duration
@@ -662,7 +678,6 @@ pub fn imdb_client_builder() -> Result<Client, reqwest::Error> {
 }
 
 impl ExportFiles {
-    #[must_use]
     pub fn new() -> Result<Self, std::io::Error> {
         let write_header = |wtr| -> Writer<File> {
             let mut wtr: Writer<File> = csv::Writer::from_writer(wtr);
@@ -705,6 +720,7 @@ impl ExportFiles {
 }
 
 impl AlternateTitle {
+    #[must_use]
     pub fn score_title(language: &str) -> u8 {
         if language.contains("USA") || language.contains("angielski") {
             10
@@ -723,7 +739,8 @@ impl AlternateTitle {
         }
     }
 
-    pub fn fw_get_titles(url: &str, client: &Client) -> PriorityQueue<AlternateTitle, u8> {
+    #[must_use]
+    pub fn fw_get_titles(url: &str, client: &Client) -> PriorityQueue<Self, u8> {
         let response = client.get(url).send().unwrap().text().unwrap();
         let document = Html::parse_document(&response);
         let select_titles = Selector::parse(".filmTitlesSection__title").unwrap();
@@ -736,8 +753,8 @@ impl AlternateTitle {
             .for_each(|(title, language)| {
                 let title = title.inner_html();
                 let language = language.inner_html();
-                let score = AlternateTitle::score_title(&language);
-                titles.push(AlternateTitle { language, title }, score);
+                let score = Self::score_title(&language);
+                titles.push(Self { language, title }, score);
             });
         titles
     }
@@ -775,7 +792,7 @@ mod tests {
                     title: title.to_string(),
                     language: language.to_string(),
                 },
-                AlternateTitle::score_title(&language),
+                AlternateTitle::score_title(language),
             );
         });
         let alternate_titles = AlternateTitle::fw_get_titles(
@@ -805,7 +822,7 @@ mod tests {
                     title: title.to_string(),
                     language: language.to_string(),
                 },
-                AlternateTitle::score_title(&language),
+                AlternateTitle::score_title(language),
             );
         });
         assert_eq!("USA", expected_titles.pop().unwrap().0.language);

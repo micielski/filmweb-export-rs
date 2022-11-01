@@ -11,3 +11,4 @@ Cargo.lock
 
 # Exported user data from Filmweb
 /exports
+src/exports
