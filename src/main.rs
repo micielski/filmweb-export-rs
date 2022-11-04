@@ -52,12 +52,12 @@ impl ClientPool {
         &self.clients[(i % self.clients.len() as u8) as usize]
     }
 
-    // TODO: consume client_sample
-    fn new(client_sample: &Client, amount: u8) -> Self {
+    fn new(client_sample: Client, amount: u8) -> Self {
         let mut clients = Vec::new();
-        for _ in 0..amount {
+        for _ in 0..amount - 1 {
             clients.push(client_sample.clone());
         }
+        clients.push(client_sample);
 
         Self { clients }
     }
@@ -75,10 +75,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fw_client = FwUser::filmweb_client_builder(&token, &session, &jwt)?;
     let username = handle_empty_username(&ARGS, &fw_client);
     let mut user = FwUser::new(username, token, session, jwt);
-    let fw_client_pool = ClientPool::new(&fw_client, 9);
+    let fw_client_pool = ClientPool::new(fw_client, 9);
 
     let imdb_client = imdb_client_builder()?;
-    let imdb_client_pool = Arc::new(ClientPool::new(&imdb_client, 9));
+    let imdb_client_pool = Arc::new(ClientPool::new(imdb_client, 9));
 
     // Get count of rated films, and convert it to number of pages
     user.get_counts(fw_client_pool.get_a_client(1))?;
