@@ -285,17 +285,14 @@ fn print_title(title: &FwRatedTitle) {
     let print_rating = || match title.rating.as_ref() {
         Some(api) if api.favorite => format!("{}/10 \u{2665}", api.rate).red(),
         Some(api) => format!("{}/10", api.rate).normal(),
-        _ => "".to_owned().normal(),
+        _ => String::new().normal(),
     };
 
     let print_not_found = || {
         println!("{} {} {}", "[-]".red(), title.fw_title_pl, print_rating());
     };
 
-    let imdb_title = match title.imdb_data {
-        Some(ref data) => &data.title,
-        None => unreachable!(),
-    };
+    let imdb_title = &title.imdb_data.as_ref().unwrap().title;
 
     let print_found = |imdb_api: &IMDbApiDetails| {
         println!(

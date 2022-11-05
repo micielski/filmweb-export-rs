@@ -290,10 +290,7 @@ impl FwPage {
                         .trim()
                         .parse::<u16>()
                         .expect("Failed to parse a year from a serial votebox");
-                    let year_end = match years[1].trim().parse::<u16>() {
-                        Ok(year) => year,
-                        Err(_) => year_start,
-                    };
+                    let year_end = years[1].trim().parse::<u16>().map_or(year_start, |year| year);
                     Year::Range(year_start, year_end)
                 } else {
                     match year.trim().parse::<u16>() {
@@ -363,7 +360,7 @@ impl FwPage {
                     let res = fw_client.get(&title_url).send().unwrap().text().unwrap();
                     Html::parse_document(&res)
                 };
-                match document
+                document
                     .select(&Selector::parse(".filmCoverSection__duration").unwrap())
                     .next()
                     .unwrap()
@@ -371,10 +368,7 @@ impl FwPage {
                     .attr("data-duration")
                     .unwrap()
                     .parse::<u16>()
-                {
-                    Ok(mins) => Some(mins),
-                    Err(_) => None,
-                }
+                    .ok()
             };
             self.rated_titles.push(FwRatedTitle {
                 fw_url: title_url.clone(),
@@ -606,15 +600,11 @@ impl FwRatedTitle {
     }
 
     pub fn export_csv(&self, files: &mut ExportFiles) {
-        let title = {
-            match self.fw_alter_titles {
-                Some(ref alter_titles) => match alter_titles.peek() {
-                    Some(alter_title) => &alter_title.0.title,
-                    None => &self.fw_title_pl,
-                },
-                None => &self.fw_title_pl,
-            }
-        };
+        let title = self.fw_alter_titles.as_ref().map_or(&self.fw_title_pl, |alter_titles| {
+            alter_titles
+                .peek()
+                .map_or(&self.fw_title_pl, |alter_title| &alter_title.0.title)
+        });
 
         let rating = self
             .rating
@@ -681,7 +671,7 @@ impl ExportFiles {
     pub fn new() -> Result<Self, std::io::Error> {
         let write_header = |wtr| -> Writer<File> {
             let mut wtr: Writer<File> = csv::Writer::from_writer(wtr);
-            wtr.write_record(&[
+            wtr.write_record([
                 "Const",
                 "Your Rating",
                 "Date Rated",
