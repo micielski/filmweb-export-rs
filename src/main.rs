@@ -1,4 +1,3 @@
-use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use filmweb_export_rs::{
