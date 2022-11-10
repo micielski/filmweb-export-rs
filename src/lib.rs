@@ -210,7 +210,6 @@ impl FwUser {
 }
 
 impl FwPage {
-    #[must_use]
     pub fn new(page_type: FwPageNumber, user: &FwUser, fw_client: &Client) -> Result<Self, FwErrors> {
         let page_source = Self::get_filmweb_page(user, page_type, fw_client)?;
         Ok(Self {
@@ -716,7 +715,6 @@ impl AlternateTitle {
         }
     }
 
-    #[must_use]
     pub fn fw_get_titles(url: &str, client: &Client) -> Result<PriorityQueue<Self, u8>, FwErrors> {
         let response = client.get(url).send().unwrap().text()?;
         let document = Html::parse_document(&response);
