@@ -1,23 +1,23 @@
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
+use filmweb_export_rs::{
+    imdb_client_builder, ExportFiles, FwPage, FwPageNumber, FwRatedTitle, FwTitleType, FwUser, IMDbApiDetails,
+};
 use lazy_static::lazy_static;
 use reqwest::blocking::Client;
 use std::io::{stdin, stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Sender};
+// use std::sync::mpsc::{channel, Sender};
+use flume::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-
-use filmweb_export_rs::{
-    imdb_client_builder, ExportFiles, FwErrors, FwPage, FwPageNumber, FwRatedTitle, FwTitleType, FwUser, IMDbApiDetails,
-};
 
 #[derive(Parser, Debug)]
 #[command(name = "filmweb-export")]
 #[command(author = "Remigiusz M <remigiusz.micielski@gmail.com>")]
 #[command(version = "0.1.0")]
-#[command(about = "Exports user data from filmweb.pl to IMDBv2 csv file format", long_about = None)]
+#[command(about = "Exports user data from filmweb.pl to IMDBv3 csv file format", long_about = None)]
 struct Args {
     #[arg(short, long, value_parser)]
     username: Option<String>,
@@ -75,18 +75,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fw_client = FwUser::filmweb_client_builder(&token, &session, &jwt)?;
     let username = handle_empty_username(&ARGS, &fw_client);
     let mut user = FwUser::new(username, token, session, jwt);
-    let fw_client_pool = ClientPool::new(fw_client, 9);
+    let fw_client_pool = ClientPool::new(fw_client, 4);
 
     let imdb_client = imdb_client_builder()?;
-    let imdb_client_pool = Arc::new(ClientPool::new(imdb_client, 9));
+    let imdb_client_pool = Arc::new(ClientPool::new(imdb_client, 4));
 
     // Get count of rated films, and convert it to number of pages
     user.get_counts(fw_client_pool.get_a_client(1))?;
-    let titles_counts = user.titles_count.unwrap(); // if above line executed, it won't panic
-    let films_pages = (titles_counts.films / 25 + 1) as u8;
-    let serials_pages = (titles_counts.serials / 25 + 1) as u8;
-    let wants2see_pages = (titles_counts.marked_to_see / 25 + 1) as u8;
+    let counts = user.counts.as_ref().unwrap(); // if above line executed, it won't panic
+    let films_pages = (counts.votes.films / 25 + 1) as u8;
+    let serials_pages = (counts.votes.serials / 25 + 1) as u8;
+    let wants2see_pages = ((counts.w2s.films + counts.w2s.serials) / 25 + 1) as u8;
     let total_pages = films_pages + serials_pages + wants2see_pages;
+
     let exported_pages: Arc<Mutex<Vec<FwPage>>> = Arc::new(Mutex::new(Vec::with_capacity(total_pages as usize)));
 
     let (handle, tx) = imdb_scraping_thread(&Arc::clone(&exported_pages), imdb_client_pool, total_pages);
@@ -120,7 +121,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::io::stdout().flush()?;
                     let mut decision = String::new();
                     stdin().read_line(&mut decision).expect("Invalid input");
-                    println!();
                     if decision.trim().to_lowercase() == "y" {
                         title.export_csv(&mut export_files);
                     } else {
@@ -200,30 +200,13 @@ fn scrape_fw(
                     FwTitleType::WantsToSee => FwPageNumber::WantsToSee(i),
                 };
                 let mut fw_page = FwPage::new(page_type, user, clientpool.get_a_client(i));
-                if let Err(e) = fw_page.scrape_from_page(clientpool.get_a_client(i)) {
-                    match e {
-                        FwErrors::InvalidJwt => {
-                            eprintln!(
-                                "{}",
-                                "JWT is invalid/has invalidated. Try again with a fresh cookie".red()
-                            );
-                            // *error_happened_clone.lock().unwrap() = true;
-                            error_happened_clone.store(false, Ordering::Relaxed);
-                            std::process::exit(1)
-                        }
-                        FwErrors::InvalidYear { title_id, failed_year } => {
-                            eprintln!("{} {}", "Couldn't parse a year for title with id".red(), title_id);
-                            eprintln!("{} {}", "String that failed to parse:".blue(), failed_year);
-                            error_happened_clone.store(true, Ordering::Relaxed);
-                            std::process::exit(1)
-                        }
-                        FwErrors::ZeroResults | FwErrors::InvalidDuration | FwErrors::InvalidCredentials => {
-                            unreachable!()
-                        }
-                    }
+                if let Err(e) = fw_page.as_mut().unwrap().scrape_from_page(clientpool.get_a_client(i)) {
+                    eprintln!("{} {e}", "error occured: ".red());
+                    error_happened_clone.store(false, Ordering::Relaxed);
+                    std::process::exit(1);
                 };
-                tx.lock().unwrap().send(fw_page).unwrap();
-                println!("\r{} Scraping {}... [{}/{}]", "[i]".blue(), what, i, total_pages);
+                tx.lock().unwrap().send(fw_page.unwrap()).unwrap();
+                println!("{} Scraping {}... [{}/{}]", "[i]".blue(), what, i, total_pages);
                 stdout().flush().unwrap();
             });
         }
@@ -242,7 +225,7 @@ fn imdb_scraping_thread(
     imdb_client_pool: Arc<ClientPool>,
     pages_count: u8,
 ) -> (JoinHandle<()>, Arc<Mutex<Sender<FwPage>>>) {
-    let (tx, rx) = channel::<FwPage>();
+    let (tx, rx) = flume::unbounded::<FwPage>();
     let rx = Arc::new(Mutex::new(rx));
     let tx = Arc::new(Mutex::new(tx));
     let exported_pages_clone = Arc::clone(exported_pages);
@@ -287,13 +270,9 @@ fn print_title(title: &FwRatedTitle) {
         Some(api) => format!("{}/10", api.rate).normal(),
         _ => String::new().normal(),
     };
-
     let print_not_found = || {
         println!("{} {} {}", "[-]".red(), title.fw_title_pl, print_rating());
     };
-
-    let imdb_title = &title.imdb_data.as_ref().unwrap().title;
-
     let print_found = |imdb_api: &IMDbApiDetails| {
         println!(
             "{} {} {} {}{} {}",
@@ -301,7 +280,7 @@ fn print_title(title: &FwRatedTitle) {
             title.fw_title_pl,
             print_rating(),
             "| ".dimmed(),
-            imdb_title.dimmed(),
+            imdb_api.title.dimmed(),
             imdb_api.id.dimmed()
         );
     };

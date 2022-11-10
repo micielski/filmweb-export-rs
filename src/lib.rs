@@ -6,23 +6,11 @@ use reqwest::header;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::{fs, fs::File};
-use thiserror::Error;
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/106.0";
 
-#[derive(Error, Debug)]
-pub enum FwErrors {
-    #[error("title not found")]
-    ZeroResults,
-    #[error("couldn't fetch duration")]
-    InvalidDuration,
-    #[error("provided JWT is invalid/invalidated")]
-    InvalidJwt,
-    #[error("year parsing error")]
-    InvalidYear { title_id: u32, failed_year: String },
-    #[error("invalid credentials")]
-    InvalidCredentials,
-}
+pub mod error;
+pub use error::FwErrors;
 
 #[derive(Clone, Copy, Debug)]
 pub enum FwTitleType {
@@ -54,7 +42,8 @@ pub struct FwUser {
     pub token: String,
     pub session: String,
     pub jwt: String,
-    pub titles_count: Option<TitlesCount>,
+    // TODO: remove option
+    pub counts: Option<UserCounts>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +51,40 @@ pub struct TitlesCount {
     pub films: u16,
     pub serials: u16,
     pub marked_to_see: u16,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct UserCounts {
+    pub votes: UserCountsVotes,
+    pub w2s: UserCountsW2s,
+    pub favorite: UserCountsFavorite,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct UserCountsVotes {
+    pub films: u16,
+    pub serials: u16,
+    pub games: u16,
+    pub tvshows: u16,
+    #[serde(rename = "roleCount")]
+    pub role_count: u16,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct UserCountsW2s {
+    pub films: u16,
+    pub serials: u16,
+    pub games: u16,
+    pub tvshows: u16,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct UserCountsFavorite {
+    pub films: u16,
+    pub serials: u16,
+    pub games: u16,
+    pub tvshows: u16,
+    pub people: u16,
 }
 
 #[derive(Debug)]
@@ -127,17 +150,12 @@ impl FwUser {
             token,
             session,
             jwt,
-            titles_count: None,
+            counts: None,
         }
     }
 
     pub fn get_username(fw_client: &Client) -> Result<String, FwErrors> {
-        let res = fw_client
-            .get("https://www.filmweb.pl/settings")
-            .send()
-            .unwrap()
-            .text()
-            .unwrap();
+        let res = fw_client.get("https://www.filmweb.pl/settings").send()?.text()?;
         let document = Html::parse_document(&res);
         let username = match document
             .select(&Selector::parse(".mainSettings__groupItemStateContent").unwrap())
@@ -149,7 +167,7 @@ impl FwUser {
         Ok(username)
     }
 
-    pub fn filmweb_client_builder(token: &str, session: &str, jwt: &str) -> Result<Client, reqwest::Error> {
+    pub fn filmweb_client_builder(token: &str, session: &str, jwt: &str) -> Result<Client, FwErrors> {
         log::debug!("Creating Filmweb Client");
         let cookies = format!(
             "_fwuser_token={}; _fwuser_sessionId={}; JWT={};",
@@ -159,94 +177,65 @@ impl FwUser {
         );
 
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::COOKIE, header::HeaderValue::from_str(&cookies).unwrap());
+        headers.insert(header::COOKIE, header::HeaderValue::from_str(&cookies)?);
         headers.insert(header::CONNECTION, header::HeaderValue::from_static("keep-alive"));
         headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("gzip"));
 
-        Client::builder()
+        Ok(Client::builder()
             .user_agent(USER_AGENT)
             .gzip(true)
             .default_headers(headers)
             .cookie_store(true)
-            .build()
+            .build()?)
     }
 
     pub fn get_counts(&mut self, fw_client: &Client) -> Result<(), Box<dyn std::error::Error>> {
-        let response = {
-            let unparsed_response = fw_client
+        let document = {
+            let response = fw_client
                 .get(format!("https://www.filmweb.pl/user/{}", self.username))
                 .send()?
                 .text()?;
-            Html::parse_document(&unparsed_response)
+            Html::parse_document(&response)
         };
-        let films: u16 = response
-            .select(&Selector::parse(".VoteStatsBox").unwrap())
+
+        let json = document
+            .select(&Selector::parse(".voteStatsBoxData").unwrap())
             .next()
             .unwrap()
-            .value()
-            .attr("data-filmratedcount")
-            .unwrap()
-            .parse::<u16>()?;
-        let serials: u16 = response
-            .select(&Selector::parse(".VoteStatsBox").unwrap())
-            .next()
-            .unwrap()
-            .value()
-            .attr("data-serialratedcount")
-            .unwrap()
-            .parse::<u16>()?;
-        let marked_to_see: u16 = response
-            .select(&Selector::parse(".VoteStatsBox").unwrap())
-            .next()
-            .unwrap()
-            .value()
-            .attr("data-filmw2scount")
-            .unwrap()
-            .parse::<u16>()?;
-        self.titles_count = Some(TitlesCount {
-            films,
-            serials,
-            marked_to_see,
-        });
+            .inner_html();
+        let counts: UserCounts = serde_json::from_str(&json)?;
+        self.counts = Some(counts);
         Ok(())
     }
 }
 
 impl FwPage {
     #[must_use]
-    pub fn new(page_type: FwPageNumber, user: &FwUser, fw_client: &Client) -> Self {
-        let page_source = Self::get_filmweb_page(user, page_type, fw_client).unwrap();
-        Self {
+    pub fn new(page_type: FwPageNumber, user: &FwUser, fw_client: &Client) -> Result<Self, FwErrors> {
+        let page_source = Self::get_filmweb_page(user, page_type, fw_client)?;
+        Ok(Self {
             page_type,
             page_source,
             rated_titles: Vec::new(),
-        }
+        })
     }
 
-    fn get_filmweb_page(
-        user: &FwUser,
-        page: FwPageNumber,
-        fw_client: &Client,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    fn get_filmweb_page(user: &FwUser, page: FwPageNumber, fw_client: &Client) -> Result<String, FwErrors> {
         let filmweb_user = match page {
             FwPageNumber::Films(page) if page != 0 => fw_client
                 .get(format!(
                     "https://www.filmweb.pl/user/{}/films?page={}",
                     user.username, page
                 ))
-                .send()
-                .unwrap()
-                .text()
-                .unwrap(),
+                .send()?
+                .text()?,
             FwPageNumber::Serials(page) if page != 0 => fw_client
                 .get(format!(
                     "https://www.filmweb.pl/user/{}/serials?page={}",
                     user.username, page
                 ))
-                .send()
-                .unwrap()
-                .text()
-                .unwrap(),
+                .send()?
+                .text()?,
             FwPageNumber::WantsToSee(page) if page != 0 => fw_client
                 .get(format!(
                     "https://www.filmweb.pl/user/{}/wantToSee?page={}",
@@ -273,7 +262,7 @@ impl FwPage {
                     .value()
                     .attr("data-film-id")
                     .unwrap();
-                fw_title_id.trim().parse::<u32>().unwrap()
+                fw_title_id.trim().parse::<u32>()?
             };
 
             let year = {
@@ -347,7 +336,7 @@ impl FwPage {
 
                 // JWT could be invalidated meanwhile
                 match api_response {
-                    Some(response) => match response.unwrap().json() {
+                    Some(response) => match response?.json() {
                         Ok(v) => v,
                         Err(_) => return Err(FwErrors::InvalidJwt),
                     },
@@ -357,7 +346,7 @@ impl FwPage {
 
             let fw_duration = {
                 let document = {
-                    let res = fw_client.get(&title_url).send().unwrap().text().unwrap();
+                    let res = fw_client.get(&title_url).send()?.text()?;
                     Html::parse_document(&res)
                 };
                 document
@@ -374,7 +363,7 @@ impl FwPage {
                 fw_url: title_url.clone(),
                 fw_id: fw_title_id,
                 fw_title_pl,
-                fw_alter_titles: Some(AlternateTitle::fw_get_titles(&alternate_titles_url, fw_client)),
+                fw_alter_titles: Some(AlternateTitle::fw_get_titles(&alternate_titles_url, fw_client)?),
                 title_type: self.page_type.into(),
                 fw_duration,
                 year,
@@ -468,9 +457,7 @@ impl FwRatedTitle {
         let title_id = {
             let id = title_data.inner_html();
             let regex = Regex::new(r"(\d{7,8})").unwrap();
-            format!("{:0>7}", regex.captures(&id).unwrap().get(0).unwrap().as_str())
-                .trim()
-                .to_string()
+            format!("{:0>7}", &regex.captures(&id).unwrap()[0]).trim().to_string()
         };
         log::debug!("Found a potential IMDb id for {title} {year_start} on {url}");
 
@@ -730,8 +717,8 @@ impl AlternateTitle {
     }
 
     #[must_use]
-    pub fn fw_get_titles(url: &str, client: &Client) -> PriorityQueue<Self, u8> {
-        let response = client.get(url).send().unwrap().text().unwrap();
+    pub fn fw_get_titles(url: &str, client: &Client) -> Result<PriorityQueue<Self, u8>, FwErrors> {
+        let response = client.get(url).send().unwrap().text()?;
         let document = Html::parse_document(&response);
         let select_titles = Selector::parse(".filmTitlesSection__title").unwrap();
         let select_language = Selector::parse(".filmTitlesSection__desc").unwrap();
@@ -746,7 +733,7 @@ impl AlternateTitle {
                 let score = Self::score_title(&language);
                 titles.push(Self { language, title }, score);
             });
-        titles
+        Ok(titles)
     }
 }
 
@@ -790,7 +777,7 @@ mod tests {
             &client,
         );
 
-        assert_eq!(expected_titles.len(), alternate_titles.len())
+        assert_eq!(expected_titles.len(), alternate_titles.unwrap().len())
     }
 
     #[test]

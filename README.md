@@ -1,8 +1,9 @@
 <div align="center">
-  <h1>🎥 filmweb-export-rs</h1>
-  <p>export 🚀blazingly fast🚀 Filmweb's ratings to a TMDB import-compatible csv file 😱 (IMDb v3 to be exact)</p>
-  <a><img src="https://user-images.githubusercontent.com/73398428/200909825-9195f6b9-4e37-43ab-82a4-127edf27e6c0.png" height="594" width="1061"></a>
+  <h1>🎥 filmweb-export</h1>
+  <p>export 🚀blazingly🚀 fast Filmweb's ratings to a TMDB import-compatible csv file 😱 (IMDb v3 to be exact)</p>
 </div>
+
+![screenshot](screenshots/screen.png)
 
 # Table of contents
 - [Features](#features)
