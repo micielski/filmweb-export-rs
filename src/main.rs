@@ -1,7 +1,7 @@
 use clap::Parser;
 use colored::Colorize;
 use filmweb_export_rs::{
-    imdb_client_builder, ExportFiles, FwPage, FwPageNumber, FwRatedTitle, FwTitleType, FwUser, IMDbApiDetails,
+    imdb_client_builder, ExportFiles, FwPage, FwPageNumbered, FwRatedTitle, FwTitleType, FwUser, IMDbApiDetails,
 };
 use lazy_static::lazy_static;
 use reqwest::blocking::Client;
@@ -194,12 +194,16 @@ fn scrape_fw(
             let error_happened_clone = Arc::clone(&error_happened);
             s.spawn(move |_| {
                 let page_type = match **page_type_clone {
-                    FwTitleType::Film => FwPageNumber::Films(i),
-                    FwTitleType::Serial => FwPageNumber::Serials(i),
-                    FwTitleType::WantsToSee => FwPageNumber::WantsToSee(i),
+                    FwTitleType::Film => FwPageNumbered::Films(i),
+                    FwTitleType::Serial => FwPageNumbered::Serials(i),
+                    FwTitleType::WantsToSee => FwPageNumbered::WantsToSee(i),
                 };
-                let mut fw_page = FwPage::new(page_type, user, clientpool.get_a_client(i));
-                if let Err(e) = fw_page.as_mut().unwrap().scrape_from_page(clientpool.get_a_client(i)) {
+                let mut fw_page = FwPage::new(page_type);
+                if let Err(e) = fw_page
+                    .as_mut()
+                    .unwrap()
+                    .scrape(&user.username, clientpool.get_a_client(i))
+                {
                     eprintln!("{} {e}", "error occured: ".red());
                     error_happened_clone.store(false, Ordering::Relaxed);
                     std::process::exit(1);

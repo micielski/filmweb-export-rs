@@ -20,18 +20,18 @@ pub enum FwTitleType {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum FwPageNumber {
+pub enum FwPageNumbered {
     Films(u8),
     Serials(u8),
     WantsToSee(u8),
 }
 
-impl From<FwPageNumber> for FwTitleType {
-    fn from(fw_page_number: FwPageNumber) -> Self {
+impl From<FwPageNumbered> for FwTitleType {
+    fn from(fw_page_number: FwPageNumbered) -> Self {
         match fw_page_number {
-            FwPageNumber::Films(_) => Self::Film,
-            FwPageNumber::Serials(_) => Self::Serial,
-            FwPageNumber::WantsToSee(_) => Self::WantsToSee,
+            FwPageNumbered::Films(_) => Self::Film,
+            FwPageNumbered::Serials(_) => Self::Serial,
+            FwPageNumbered::WantsToSee(_) => Self::WantsToSee,
         }
     }
 }
@@ -89,8 +89,7 @@ pub struct UserCountsFavorite {
 
 #[derive(Debug)]
 pub struct FwPage {
-    pub page_type: FwPageNumber,
-    page_source: String,
+    pub page: FwPageNumbered,
     pub rated_titles: Vec<FwRatedTitle>,
 }
 
@@ -210,49 +209,36 @@ impl FwUser {
 }
 
 impl FwPage {
-    pub fn new(page_type: FwPageNumber, user: &FwUser, fw_client: &Client) -> Result<Self, FwErrors> {
-        let page_source = Self::get_filmweb_page(user, page_type, fw_client)?;
+    pub fn new(page_type: FwPageNumbered) -> Result<Self, FwErrors> {
         Ok(Self {
-            page_type,
-            page_source,
+            page: page_type,
             rated_titles: Vec::new(),
         })
     }
 
-    fn get_filmweb_page(user: &FwUser, page: FwPageNumber, fw_client: &Client) -> Result<String, FwErrors> {
-        let filmweb_user = match page {
-            FwPageNumber::Films(page) if page != 0 => fw_client
-                .get(format!(
-                    "https://www.filmweb.pl/user/{}/films?page={}",
-                    user.username, page
-                ))
-                .send()?
-                .text()?,
-            FwPageNumber::Serials(page) if page != 0 => fw_client
-                .get(format!(
-                    "https://www.filmweb.pl/user/{}/serials?page={}",
-                    user.username, page
-                ))
-                .send()?
-                .text()?,
-            FwPageNumber::WantsToSee(page) if page != 0 => fw_client
-                .get(format!(
-                    "https://www.filmweb.pl/user/{}/wantToSee?page={}",
-                    user.username, page
-                ))
-                .send()?
-                .text()?,
-            _ => panic!("Page cannot be 0"),
+    fn get_url(username: &str, page: FwPageNumbered) -> String {
+        let url = match page {
+            FwPageNumbered::Films(page) if page != 0 => {
+                format!("https://www.filmweb.pl/user/{}/films?page={}", username, page)
+            }
+            FwPageNumbered::Serials(page) if page != 0 => {
+                format!("https://www.filmweb.pl/user/{}/serials?page={}", username, page)
+            }
+            FwPageNumbered::WantsToSee(page) if page != 0 => {
+                format!("https://www.filmweb.pl/user/{}/wantToSee?page={}", username, page)
+            }
+            _ => panic!("Page mustn't be 0"),
         };
-        Ok(filmweb_user)
+        url
     }
 
-    pub fn scrape_from_page(&mut self, fw_client: &Client) -> Result<(), FwErrors> {
-        assert!(self.page_source.contains("preview__alternateTitle"));
-        assert!(self.page_source.contains("preview__year"));
-        assert!(self.page_source.contains("preview__link"));
-        let html = Html::parse_document(&self.page_source);
-        for votebox in html.select(&Selector::parse("div.myVoteBox").unwrap()) {
+    pub fn scrape(&mut self, username: &str, fw_client: &Client) -> Result<(), FwErrors> {
+        let res = fw_client.get(FwPage::get_url(username, self.page)).send()?.text()?;
+        assert!(res.contains("preview__alternateTitle"));
+        assert!(res.contains("preview__year"));
+        assert!(res.contains("preview__link"));
+        let document = Html::parse_document(&res);
+        for votebox in document.select(&Selector::parse("div.myVoteBox").unwrap()) {
             let fw_title_id = {
                 let fw_title_id = votebox
                     .select(&Selector::parse(".previewFilm").unwrap())
@@ -313,8 +299,8 @@ impl FwPage {
             let alternate_titles_url = format!("{}/titles", title_url);
 
             let rating: Option<FwApiDetails> = {
-                let api_response = match self.page_type {
-                    FwPageNumber::Films(_) => Some(
+                let api_response = match self.page {
+                    FwPageNumbered::Films(_) => Some(
                         fw_client
                             .get(format!(
                                 "https://www.filmweb.pl/api/v1/logged/vote/film/{}/details",
@@ -322,7 +308,7 @@ impl FwPage {
                             ))
                             .send(),
                     ),
-                    FwPageNumber::Serials(_) => Some(
+                    FwPageNumbered::Serials(_) => Some(
                         fw_client
                             .get(format!(
                                 "https://www.filmweb.pl/api/v1/logged/vote/serial/{}/details",
@@ -330,7 +316,7 @@ impl FwPage {
                             ))
                             .send(),
                     ),
-                    FwPageNumber::WantsToSee(_) => None,
+                    FwPageNumbered::WantsToSee(_) => None,
                 };
 
                 // JWT could be invalidated meanwhile
@@ -363,7 +349,7 @@ impl FwPage {
                 fw_id: fw_title_id,
                 fw_title_pl,
                 fw_alter_titles: Some(AlternateTitle::fw_get_titles(&alternate_titles_url, fw_client)?),
-                title_type: self.page_type.into(),
+                title_type: self.page.into(),
                 fw_duration,
                 year,
                 rating,
@@ -456,7 +442,7 @@ impl FwRatedTitle {
         let title_id = {
             let id = title_data.inner_html();
             let regex = Regex::new(r"(\d{7,8})").unwrap();
-            format!("{:0>7}", &regex.captures(&id).unwrap()[0]).trim().to_string()
+            format!("tt{:0>7}", &regex.captures(&id).unwrap()[0]).trim().to_string()
         };
         log::debug!("Found a potential IMDb id for {title} {year_start} on {url}");
 
