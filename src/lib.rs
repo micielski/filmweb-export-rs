@@ -217,7 +217,7 @@ impl FwPage {
     }
 
     fn get_url(username: &str, page: FwPageNumbered) -> String {
-        let url = match page {
+        match page {
             FwPageNumbered::Films(page) if page != 0 => {
                 format!("https://www.filmweb.pl/user/{}/films?page={}", username, page)
             }
@@ -228,8 +228,7 @@ impl FwPage {
                 format!("https://www.filmweb.pl/user/{}/wantToSee?page={}", username, page)
             }
             _ => panic!("Page mustn't be 0"),
-        };
-        url
+        }
     }
 
     pub fn scrape(&mut self, username: &str, fw_client: &Client) -> Result<(), FwErrors> {
