@@ -34,7 +34,7 @@ struct Args {
     jwt: Option<String>,
 
     /// Number of threads to spawn
-    #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u8).range(1..7))]
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u8).range(1..8))]
     threads: u8,
 
     /// If enabled, successfully exported titles won't be printed
@@ -82,10 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get count of rated films, and convert it to number of pages
     user.get_counts(fw_client_pool.get_a_client(1))?;
     let counts = user.counts.as_ref().unwrap(); // if above line executed, it won't panic
-    let films_pages = (counts.votes.films / 25 + 1) as u8;
-    let serials_pages = (counts.votes.serials / 25 + 1) as u8;
-    let wants2see_pages = ((counts.w2s.films + counts.w2s.serials) / 25 + 1) as u8;
-    let total_pages = films_pages + serials_pages + wants2see_pages;
+    let movies_pages = (counts.movies / 25 + 1) as u8;
+    let serials_pages = (counts.shows / 25 + 1) as u8;
+    let wants2see_pages = (counts.marked_to_see / 25 + 1) as u8;
+    let total_pages = movies_pages + serials_pages + wants2see_pages;
 
     let exported_pages: Arc<Mutex<Vec<FwPage>>> = Arc::new(Mutex::new(Vec::with_capacity(total_pages as usize)));
 
@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Scraping actual data from Filmweb
     for (pages_count, page_type) in [
-        (films_pages, FwTitleType::Film),
+        (movies_pages, FwTitleType::Film),
         (serials_pages, FwTitleType::Serial),
         (wants2see_pages, FwTitleType::WantsToSee),
     ] {
@@ -110,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if title.is_duration_ok() {
                     title.export_csv(&mut export_files);
                 } else {
-                    let url = format!("https://www.imdb.com/title/tt{}", imdb_data.id);
+                    let url = format!("https://www.imdb.com/title/{}", imdb_data.id);
                     print!(
                         "{} Is {} a good match for {}? (y/N): ",
                         "[?]".blue(),
@@ -193,7 +193,7 @@ fn scrape_fw(
             let page_type_clone = Arc::clone(&page_type_arc);
             let error_happened_clone = Arc::clone(&error_happened);
             s.spawn(move |_| {
-                let page_type = match **page_type_clone {
+                let page_type = match *page_type_clone {
                     FwTitleType::Film => FwPageNumbered::Films(i),
                     FwTitleType::Serial => FwPageNumbered::Serials(i),
                     FwTitleType::WantsToSee => FwPageNumbered::WantsToSee(i),

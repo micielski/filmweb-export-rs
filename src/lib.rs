@@ -12,14 +12,14 @@ const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Ge
 pub mod error;
 pub use error::FwErrors;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FwTitleType {
     Film,
     Serial,
     WantsToSee,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FwPageNumbered {
     Films(u8),
     Serials(u8),
@@ -36,7 +36,7 @@ impl From<FwPageNumbered> for FwTitleType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FwUser {
     pub username: String,
     pub token: String,
@@ -46,54 +46,20 @@ pub struct FwUser {
     pub counts: Option<UserCounts>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct TitlesCount {
-    pub films: u16,
-    pub serials: u16,
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UserCounts {
+    pub movies: u16,
+    pub shows: u16,
     pub marked_to_see: u16,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct UserCounts {
-    pub votes: UserCountsVotes,
-    pub w2s: UserCountsW2s,
-    pub favorite: UserCountsFavorite,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct UserCountsVotes {
-    pub films: u16,
-    pub serials: u16,
-    pub games: u16,
-    pub tvshows: u16,
-    #[serde(rename = "roleCount")]
-    pub role_count: u16,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct UserCountsW2s {
-    pub films: u16,
-    pub serials: u16,
-    pub games: u16,
-    pub tvshows: u16,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct UserCountsFavorite {
-    pub films: u16,
-    pub serials: u16,
-    pub games: u16,
-    pub tvshows: u16,
-    pub people: u16,
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FwPage {
     pub page: FwPageNumbered,
     pub rated_titles: Vec<FwRatedTitle>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FwApiDetails {
     pub rate: u8,
     pub favorite: bool,
@@ -102,14 +68,14 @@ pub struct FwApiDetails {
     pub timestamp: u128,
 }
 
-#[derive(Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IMDbApiDetails {
     pub title: String,
     pub id: String,
     pub duration: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FwRatedTitle {
     pub fw_url: String,
     pub fw_id: u32,
@@ -122,13 +88,13 @@ pub struct FwRatedTitle {
     pub imdb_data: Option<IMDbApiDetails>,
 }
 
-#[derive(Debug, Hash, Eq, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AlternateTitle {
     pub language: String,
     pub title: String,
 }
 
-#[derive(Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Year {
     OneYear(u16),
     Range(u16, u16),
@@ -189,27 +155,58 @@ impl FwUser {
     }
 
     pub fn get_counts(&mut self, fw_client: &Client) -> Result<(), Box<dyn std::error::Error>> {
-        let document = {
-            let response = fw_client
-                .get(format!("https://www.filmweb.pl/user/{}", self.username))
-                .send()?
-                .text()?;
-            Html::parse_document(&response)
-        };
+        let movies: u16 = fw_client
+            .get(format!(
+                "https://www.filmweb.pl/api/v1/user/{}/votes/film/count",
+                self.username
+            ))
+            .send()?
+            .text()?
+            .parse()
+            .unwrap();
 
-        let json = document
-            .select(&Selector::parse(".voteStatsBoxData").unwrap())
-            .next()
-            .unwrap()
-            .inner_html();
-        let counts: UserCounts = serde_json::from_str(&json)?;
-        self.counts = Some(counts);
+        let marked_to_see_movies: u16 = fw_client
+            .get(format!(
+                "https://www.filmweb.pl/api/v1/user/{}/want2see/film/count",
+                self.username
+            ))
+            .send()?
+            .text()?
+            .parse()
+            .unwrap();
+
+        let shows: u16 = fw_client
+            .get(format!(
+                "https://www.filmweb.pl/api/v1/user/{}/votes/serial/count",
+                self.username
+            ))
+            .send()?
+            .text()?
+            .parse()
+            .unwrap();
+
+        let marked_to_see_shows: u16 = fw_client
+            .get(format!(
+                "https://www.filmweb.pl/api/v1/user/{}/want2see/serial/count",
+                self.username
+            ))
+            .send()?
+            .text()?
+            .parse()
+            .unwrap();
+        let marked_to_see = marked_to_see_shows + marked_to_see_movies;
+        self.counts = Some(UserCounts {
+            movies,
+            shows,
+            marked_to_see,
+        });
+        // self.counts = Some(counts);
         Ok(())
     }
 }
 
 impl FwPage {
-    pub fn new(page_type: FwPageNumbered) -> Result<Self, FwErrors> {
+    pub const fn new(page_type: FwPageNumbered) -> Result<Self, FwErrors> {
         Ok(Self {
             page: page_type,
             rated_titles: Vec::new(),
@@ -232,7 +229,7 @@ impl FwPage {
     }
 
     pub fn scrape(&mut self, username: &str, fw_client: &Client) -> Result<(), FwErrors> {
-        let res = fw_client.get(FwPage::get_url(username, self.page)).send()?.text()?;
+        let res = fw_client.get(Self::get_url(username, self.page)).send()?.text()?;
         assert!(res.contains("preview__alternateTitle"));
         assert!(res.contains("preview__year"));
         assert!(res.contains("preview__link"));
@@ -498,7 +495,12 @@ impl FwRatedTitle {
         };
 
         let title_id = if let Some(id) = document.select(&Selector::parse(".result_text").unwrap()).next() {
-            id
+            let title_id = id.inner_html();
+            let re = Regex::new(r"(\d{7,8})").unwrap();
+            format!(
+                "tt{:0>7}",
+                re.captures(title_id.as_str()).unwrap().get(0).unwrap().as_str()
+            )
         } else {
             log::error!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
             return Err(Box::new(FwErrors::ZeroResults));
@@ -554,15 +556,8 @@ impl FwRatedTitle {
         };
         log::debug!("Found duration {duration}m for {title} {year}");
 
-        let title_id = title_id.inner_html();
-        let re = Regex::new(r"(\d{7,8})").unwrap();
-        let title_id = format!(
-            "{:08}",
-            re.captures(title_id.as_str()).unwrap().get(0).unwrap().as_str()
-        );
-
         let imdb_data = IMDbApiDetails {
-            id: title_id.trim().parse::<u32>().unwrap().to_string(),
+            id: title_id,
             title: imdb_title,
             duration,
         };
@@ -608,7 +603,6 @@ impl FwRatedTitle {
         fields[9] = year.as_ref();
         let write_title = |file: &mut Writer<File>| {
             file.write_record(fields).unwrap();
-            file.flush().unwrap();
         };
 
         match &self.rating {
