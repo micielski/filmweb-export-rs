@@ -1,6 +1,6 @@
 <div align="center">
   <h1>🎥 filmweb-export</h1>
-  <p>export 🚀blazingly🚀 fast Filmweb's ratings to a TMDB import-compatible csv file 😱 (IMDb v3 to be exact)</p>
+  <p>export 🚀 blazingly fast 🚀 Filmweb's ratings to a TMDB import-compatible csv file 😱 (IMDb v3 to be exact)</p>
 </div>
 
 ![screenshot](screenshots/screen.png)
@@ -61,7 +61,7 @@ Options:
 ## Examples
 
   #### Login with cookies  
-  You'll be prompted for cookies if you won't specify these with flags.
+  You'll be prompted for cookies if you won't specify these with flags (--token, --session, --jwt).
 
   ```
   $ cargo run --release
