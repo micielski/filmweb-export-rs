@@ -319,7 +319,10 @@ impl FwPage {
                 match api_response {
                     Some(response) => match response?.json() {
                         Ok(v) => v,
-                        Err(_) => return Err(FwErrors::InvalidJwt),
+                        Err(e) => {
+                            log::info!("Bad Filmweb's api response: {e}");
+                            return Err(FwErrors::InvalidJwt)
+                        },
                     },
                     None => None,
                 }
@@ -431,7 +434,7 @@ impl FwRatedTitle {
         {
             id
         } else {
-            log::error!("Failed to get a match in Fn get_imdb_data_advanced for {title} {year_start} on {url}");
+            log::info!("Failed to get a match in Fn get_imdb_data_advanced for {title} {year_start} on {url}");
             return Err(Box::new(FwErrors::ZeroResults));
         };
 
@@ -454,14 +457,14 @@ impl FwRatedTitle {
             let x = if let Some(a) = document.select(&Selector::parse(".runtime").unwrap()).next() {
                 a.inner_html().replace(" min", "")
             } else {
-                log::error!("Failed to fetch duration for {title} {year_start} on {url}");
+                log::info!("Failed to fetch duration for {title} {year_start} on {url}");
                 return Err(Box::new(FwErrors::InvalidDuration));
             };
 
             if let Ok(x) = x.parse::<u32>() {
                 x
             } else {
-                log::error!("Failed parsing duration to int for {title} {year_start} on {url}");
+                log::info!("Failed parsing duration to int for {title} {year_start} on {url}");
                 return Err(Box::new(FwErrors::InvalidDuration));
             }
         };
@@ -490,7 +493,7 @@ impl FwRatedTitle {
         let imdb_title = if let Some(title) = document.select(&Selector::parse(".result_text a").unwrap()).next() {
             title.inner_html()
         } else {
-            log::error!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
+            log::info!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
             return Err(Box::new(FwErrors::ZeroResults));
         };
 
@@ -502,7 +505,7 @@ impl FwRatedTitle {
                 re.captures(title_id.as_str()).unwrap().get(0).unwrap().as_str()
             )
         } else {
-            log::error!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
+            log::info!("No results in Fn get_imdb_data for {title} {year} on {url_query}");
             return Err(Box::new(FwErrors::ZeroResults));
         };
 
@@ -537,7 +540,7 @@ impl FwRatedTitle {
         }
 
         if dirty_duration.len() > 40 {
-            log::error!("Invalid duration in Fn get_imdb_data on {url} for {title} {year} source: {url_query}");
+            log::info!("Invalid duration in Fn get_imdb_data on {url} for {title} {year} source: {url_query}");
             return Err(Box::new(FwErrors::InvalidDuration));
         }
 

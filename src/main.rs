@@ -68,6 +68,7 @@ lazy_static! {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "filmweb-export starting...".yellow());
+    env_logger::init();
 
     let mut export_files = ExportFiles::default();
     let (token, session, jwt) = handle_empty_credentials(&ARGS);
@@ -182,7 +183,6 @@ fn scrape_fw(
         FwTitleType::Serial => "serials",
         FwTitleType::WantsToSee => "wants2see",
     };
-
     let page_type_arc = Arc::new(&titles_type);
     let error_happened = Arc::new(AtomicBool::new(false));
     let pool = rayon::ThreadPoolBuilder::new()
