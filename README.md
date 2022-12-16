@@ -40,8 +40,6 @@
 
   ```
 $ cargo run --release -- --help
-Finished release [optimized] target(s) in 1.12s
-Running `target/release/filmweb-export-rs --help`
 filmweb-export starting...
 Exports user data from filmweb.pl to IMDBv3 csv file format
 
