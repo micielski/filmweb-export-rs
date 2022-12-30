@@ -1,6 +1,6 @@
 <div align="center">
   <h1>🎥 filmweb-export</h1>
-  <p>export 🚀 blazingly fast 🚀 Filmweb's ratings to a TMDB import-compatible csv file 😱 (IMDb v3 to be exact)</p>
+  <p>export Filmweb's ratings to a TMDB import-compatible csv file</p>
 </div>
 
 ![screenshot](screenshots/screen.png)
