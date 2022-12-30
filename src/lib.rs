@@ -321,8 +321,8 @@ impl FwPage {
                         Ok(v) => v,
                         Err(e) => {
                             log::info!("Bad Filmweb's api response: {e}");
-                            return Err(FwErrors::InvalidJwt)
-                        },
+                            return Err(FwErrors::InvalidJwt);
+                        }
                     },
                     None => None,
                 }
@@ -569,12 +569,7 @@ impl FwRatedTitle {
     }
 
     pub fn export_csv(&self, files: &mut ExportFiles) {
-        let title = self.fw_alter_titles.as_ref().map_or(&self.fw_title_pl, |alter_titles| {
-            alter_titles
-                .peek()
-                .map_or(&self.fw_title_pl, |alter_title| &alter_title.0.title)
-        });
-
+        let title = &self.fw_title_pl;
         let rating = self
             .rating
             .as_ref()

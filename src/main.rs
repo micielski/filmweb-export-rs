@@ -34,7 +34,7 @@ struct Args {
     jwt: Option<String>,
 
     /// Number of threads to spawn
-    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u8).range(1..8))]
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..8))]
     threads: u8,
 
     /// If enabled, successfully exported titles won't be printed
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         title.imdb_data = None;
                     }
-                }
+                };
             }
         }
     }
