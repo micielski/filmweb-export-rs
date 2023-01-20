@@ -243,20 +243,19 @@ fn print_title(fw_title: &RatedTitle) {
         }
     };
 
-    let print_not_found = || {
-        println!("{} {} {}", "[-]".red(), fw_title.title_pl(), print_rating());
+    let print_found = |imdb_id: &str, imdb_name: &str| {
+        let prefix = "[+]".green();
+        let title_name = fw_title.title_pl();
+        let title_year = fw_title.year();
+        let rating = print_rating();
+        let separator = "|".dimmed();
+        let imdb_name = imdb_name.dimmed();
+        let imdb_title_url = format!("{}{}", "https://imdb.com/title/", imdb_id.dimmed());
+        println!("{prefix} {title_name} {title_year} {rating} {separator} {imdb_name} {imdb_title_url}");
     };
 
-    let print_found = |imdb_id: &str, imdb_name: &str| {
-        println!(
-            "{} {} {} {}{} {}",
-            "[+]".green(),
-            fw_title.title_pl(),
-            print_rating(),
-            "| ".dimmed(),
-            imdb_name.dimmed(),
-            imdb_id.dimmed()
-        );
+    let print_not_found = || {
+        println!("{} {} {}", "[-]".red(), fw_title.title_pl(), print_rating());
     };
 
     fw_title.imdb_data().map_or_else(print_not_found, |imdb_data| {
