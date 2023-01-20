@@ -1,6 +1,6 @@
 <div align="center">
   <h1>🎥 filmweb-export</h1>
-  <p>export Filmweb's ratings to a TMDB import-compatible csv file</p>
+  <p>export Filmweb's ratings to a TMDB / Letterboxd / ... import-compatible CSV file</p>
 </div>
 
 ![screenshot](screenshots/screen.png)
@@ -29,9 +29,9 @@
   ```
 # Obtaining cookies
   
-  1. Go to a page which requires authentication (i.e. not filmweb main page, but your profile https://filmweb.pl/user/YOUR_USERNAME)
+  1. Go to a page that requires authentication (i.e. not Filmweb main page, but your profile https://filmweb.pl/user/YOUR_USERNAME)
   2. Open developer tools with F12
-  3. On Firefox, navigate to the Storage tab, on Chromium; Application tab
+  3. On Firefox, navigate to the Storage tab, on Chromium; the Application tab
   4. For both browsers go to Cookies and select "https://filmweb.pl"
   5. You're searching for cookies named \_fwuser_token, \_fwuser_session, JWT. Their values are needed
 
@@ -41,7 +41,7 @@
   ```
 $ cargo run --release -- --help
 filmweb-export starting...
-Exports user data from filmweb.pl to IMDBv3 csv file format
+Exports user data from filmweb.pl to IMDBv3 CSV file format
 
 Usage: filmweb-export-rs [OPTIONS]
 
@@ -66,15 +66,15 @@ Options:
   ```
     
   #### --threads <THREADS> 
-  It may be useful if your internet connection or computer at this time is poor in resources. In that case try lowering threads count.  
-  Please note that the default value is high enough. Going above that, it will hurt your exporting performance, and even cause some movies to not export!
+  It may be useful if your internet connection or computer at this time is poor in resources. In that case, try lowering the threads count.  
+  Please note that the default value is high enough. Going above that, will hurt your exporting performance, and even cause some movies to not export!
   
   ```
   $ cargo run --release --  --threads 2
   ```
     
   #### Debug  
-  If you are experiencing somethings abnormal, such as panics or something and you're experienced enough with rust - you may wish to enable debug printing mode
+  If you are experiencing something abnormal, such as panics or something and you're experienced enough with rust - you may wish to enable debug printing mode
   
   ```
   $ RUST_LOG=debug cargo run --release
@@ -82,4 +82,4 @@ Options:
 
 # Troubleshooting
   
-Try lowering the threads count, otherwise if it won't help, open an issue
+Try lowering the threads count, otherwise, if it won't help, open an issue

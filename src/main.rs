@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if title.is_duration_similar(title.imdb_data().unwrap().duration) {
                     title.to_csv_imdbv3_tmdb_files(&mut export_files);
                 } else {
-                    // TODO: improve input handling, ask user to input again if not 100% sure
+                    // TODO: improve input handling, ask the user to input again if not 100% sure
                     let url = format!("https://www.imdb.com/title/{}", title.imdb_data().unwrap().id);
                     print!(
                         "{} Is {} a good match for {}? (y/N): ",
@@ -95,6 +95,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     stdin().read_line(&mut decision).expect("Invalid input");
                     if decision.trim().to_lowercase() == "y" {
                         title.to_csv_imdbv3_tmdb_files(&mut export_files);
+                    } else {
+                        // Replace the title's imdb_data field Some(imdb_data) with None so it's marked
+                        // as not found at IMDb
+                        drop(title.imdb_data_owned());
                     }
                 }
             }
@@ -171,7 +175,6 @@ fn scrape_fw(
             });
         }
     });
-    println!();
     // Check if any of spawned threads returned an error
     if error_happened.load(Ordering::SeqCst) {
         eprintln!("{}", "Exiting due to some thread(s) reporting error(s)".red());
