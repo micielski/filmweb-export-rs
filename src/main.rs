@@ -14,7 +14,7 @@ use std::thread::{self, JoinHandle};
 #[derive(Parser, Debug)]
 #[command(name = "filmweb-export")]
 #[command(author = "Remigiusz Micielski <remigiusz.micielski@gmail.com>")]
-#[command(version = "0.2.0")]
+#[command(version = "0.2.1")]
 #[command(about = "Exports user data from filmweb.pl to IMDBv3 csv file format", long_about = None)]
 struct Args {
     #[arg(short, long, value_parser)]
