@@ -186,7 +186,7 @@ fn user_agrees(question: impl Display) -> bool {
         decision = decision.trim().to_lowercase();
         if decision == "y" || decision == "yes" {
             return true;
-        } else if decision == "n" || decision == "no" || decision == "" {
+        } else if decision == "n" || decision == "no" || decision.is_empty() {
             return false;
         }
         println!("{} Not understood", "[?]".yellow());
