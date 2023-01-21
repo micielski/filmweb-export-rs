@@ -5,6 +5,7 @@ use filmweb_api::{create_imdb_client, FwPageType, FwTitleType, Title};
 use flume::Sender;
 use lazy_static::lazy_static;
 use reqwest::blocking::Client;
+use std::fmt::Display;
 use std::io::{stdin, stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,7 +45,7 @@ lazy_static! {
     static ref ARGS: Args = Args::parse();
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     println!("{}", "filmweb-export starting...".yellow());
     env_logger::init();
 
@@ -82,18 +83,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if title.is_duration_similar(title.imdb_data().unwrap().duration) {
                     title.to_csv_imdbv3_tmdb_files(&mut export_files);
                 } else {
-                    // TODO: improve input handling, ask the user to input again if not 100% sure
                     let url = format!("https://www.imdb.com/title/{}", title.imdb_data().unwrap().id);
-                    print!(
-                        "{} Is {} a good match for {}? (y/N): ",
+                    let question = format!(
+                        "{} Is {url} a good match for {}? (y/N): ",
                         "[?]".blue(),
-                        url,
                         title.title_pl()
                     );
-                    std::io::stdout().flush()?;
-                    let mut decision = String::new();
-                    stdin().read_line(&mut decision).expect("Invalid input");
-                    if decision.trim().to_lowercase() == "y" {
+                    if user_agrees(question) {
                         title.to_csv_imdbv3_tmdb_files(&mut export_files);
                     } else {
                         // Replace the title's imdb_data field Some(imdb_data) with None so it's marked
@@ -105,8 +101,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     print_failed(&Arc::clone(&exported_pages));
-
-    Ok(())
 }
 
 fn handle_empty_credentials(args: &ARGS) -> (String, String, String) {
@@ -183,6 +177,22 @@ fn scrape_fw(
     Ok(())
 }
 
+fn user_agrees(question: impl Display) -> bool {
+    loop {
+        print!("{question}");
+        std::io::stdout().flush().expect("can flush");
+        let mut decision = String::new();
+        stdin().read_line(&mut decision).expect("can read line");
+        decision = decision.trim().to_lowercase();
+        if decision == "y" || decision == "yes" {
+            return true;
+        } else if decision == "n" || decision == "no" || decision == "" {
+            return false;
+        }
+        println!("{} Not understood", "[?]".yellow());
+    }
+}
+
 fn imdb_scraping_thread(
     exported_pages: &Arc<Mutex<Vec<RatedPage>>>,
     pages_count: u8,
@@ -250,7 +260,7 @@ fn print_title(fw_title: &RatedTitle) {
         let rating = print_rating();
         let separator = "|".dimmed();
         let imdb_name = imdb_name.dimmed();
-        let imdb_title_url = format!("{}{}", "https://imdb.com/title/", imdb_id.dimmed());
+        let imdb_title_url = format!("{}{}", "https://imdb.com/title/".dimmed(), imdb_id.dimmed());
         println!("{prefix} {title_name} {title_year} {rating} {separator} {imdb_name} {imdb_title_url}");
     };
 
@@ -259,6 +269,6 @@ fn print_title(fw_title: &RatedTitle) {
     };
 
     fw_title.imdb_data().map_or_else(print_not_found, |imdb_data| {
-        print_found(&imdb_data.id, &imdb_data.title)
+        print_found(&imdb_data.id, &imdb_data.title);
     });
 }
