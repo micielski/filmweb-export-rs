@@ -394,6 +394,7 @@ dependencies = [
 [[package]]
 name = "filmed"
 version = "0.1.0"
+source = "git+https://github.com/micielski/filmweb-api-rs#01529c0ccdef5cfded32928a9c02a1de5bcbd104"
 dependencies = [
  "csv",
  "fastrand",

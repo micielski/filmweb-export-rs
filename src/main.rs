@@ -55,9 +55,9 @@ fn main() {
     let user = FilmwebUser::new(token, session, jwt).unwrap();
 
     // Get count of rated films, and convert it to number of pages
-    let movies_pages = user.num_of_rated_movies();
-    let shows_pages = user.num_of_rated_shows();
-    let watchlist_pages = user.num_of_watchlisted_titles();
+    let movies_pages = user.num_of_rated_movies() / 25 + 1;
+    let shows_pages = user.num_of_rated_shows() / 25 + 1;
+    let watchlist_pages = user.num_of_watchlisted_titles() / 25 + 1;
     let total_pages = movies_pages + shows_pages + watchlist_pages;
 
     let exported_pages: Arc<Mutex<Vec<RatedPage>>> = Arc::new(Mutex::new(Vec::with_capacity(total_pages as usize)));
