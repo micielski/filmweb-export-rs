@@ -1,15 +1,16 @@
 use clap::Parser;
 use colored::Colorize;
-use filmweb_api::authenticated::{ExportFiles, FwUser, RatedPage, RatedTitle};
-use filmweb_api::{create_imdb_client, FwPageType, FwTitleType, Title};
 use flume::Sender;
 use lazy_static::lazy_static;
-use reqwest::blocking::Client;
 use std::fmt::Display;
 use std::io::{stdin, stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+
+use filmed::filmweb::auth::{ExportFiles, FilmwebUser, RatedPage, UserPage, UserPageType};
+use filmed::imdb::IMDb;
+use filmed::{IMDbLookup, RatedTitle, Title, TitleID, User};
 
 #[derive(Parser, Debug)]
 #[command(name = "filmweb-export")]
@@ -51,24 +52,24 @@ fn main() {
 
     let mut export_files = ExportFiles::default();
     let (token, session, jwt) = handle_empty_credentials(&ARGS);
-    let user = FwUser::new(token, session, jwt).unwrap();
+    let user = FilmwebUser::new(token, session, jwt).unwrap();
 
     // Get count of rated films, and convert it to number of pages
-    let movies_pages = user.counts.movies_pages();
-    let shows_pages = user.counts.shows_pages();
-    let watchlist_pages = user.counts.watchlist_pages();
+    let movies_pages = user.num_of_rated_movies();
+    let shows_pages = user.num_of_rated_shows();
+    let watchlist_pages = user.num_of_watchlisted_titles();
     let total_pages = movies_pages + shows_pages + watchlist_pages;
 
     let exported_pages: Arc<Mutex<Vec<RatedPage>>> = Arc::new(Mutex::new(Vec::with_capacity(total_pages as usize)));
 
-    let imdb_client = Arc::new(create_imdb_client().unwrap());
+    let imdb_client = Arc::new(IMDb::new());
     let (handle, tx) = imdb_scraping_thread(&Arc::clone(&exported_pages), total_pages, imdb_client);
 
     // Scraping actual data from Filmweb
     for (pages_count, page_type) in [
-        (movies_pages, FwTitleType::Film),
-        (shows_pages, FwTitleType::Show),
-        (watchlist_pages, FwTitleType::Watchlist),
+        (movies_pages, UserPageType::RatedFilms),
+        (shows_pages, UserPageType::RatedShows),
+        (watchlist_pages, UserPageType::Watchlist),
     ] {
         scrape_fw(pages_count, &user, page_type, &Arc::clone(&tx)).unwrap();
     }
@@ -80,15 +81,11 @@ fn main() {
     for page in &mut *exported_pages.lock().unwrap() {
         for title in &mut *page.rated_titles {
             if title.imdb_data().is_some() {
-                if title.is_duration_similar(title.imdb_data().unwrap().duration) {
+                if title.is_duration_similar(title.imdb_data().unwrap().duration().expect("trust me") as u32) {
                     title.to_csv_imdbv3_tmdb_files(&mut export_files);
                 } else {
                     let url = format!("https://www.imdb.com/title/{}", title.imdb_data().unwrap().id);
-                    let question = format!(
-                        "{} Is {url} a good match for {}? (y/N): ",
-                        "[?]".blue(),
-                        title.title_pl()
-                    );
+                    let question = format!("{} Is {url} a good match for {}? (y/N): ", "[?]".blue(), title.title());
                     if user_agrees(question) {
                         title.to_csv_imdbv3_tmdb_files(&mut export_files);
                     } else {
@@ -131,16 +128,16 @@ fn handle_empty_credentials(args: &ARGS) -> (String, String, String) {
 }
 
 fn scrape_fw(
-    total_pages: u8,
-    user: &FwUser,
-    titles_type: FwTitleType,
+    total_pages: u16,
+    user: &FilmwebUser,
+    titles_type: UserPageType,
     tx: &Mutex<Sender<RatedPage>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // just to print out what is being scraped
     let what = match titles_type {
-        FwTitleType::Film => "films",
-        FwTitleType::Show => "serials",
-        FwTitleType::Watchlist => "wants2see",
+        UserPageType::RatedFilms => "films",
+        UserPageType::RatedShows => "serials",
+        UserPageType::Watchlist => "wants2see",
     };
     let page_type_arc = Arc::new(&titles_type);
     let error_happened = Arc::new(AtomicBool::new(false));
@@ -153,9 +150,9 @@ fn scrape_fw(
             let error_happened_clone = Arc::clone(&error_happened);
             s.spawn(move |_| {
                 let page_type = match *page_type_clone {
-                    FwTitleType::Film => FwPageType::Films(i),
-                    FwTitleType::Show => FwPageType::Shows(i),
-                    FwTitleType::Watchlist => FwPageType::Watchlist(i),
+                    UserPageType::RatedFilms => UserPage::RatedFilms(i as u8),
+                    UserPageType::RatedShows => UserPage::RatedShows(i as u8),
+                    UserPageType::Watchlist => UserPage::Watchlist(i as u8),
                 };
                 let mut fw_page = user.scrape(page_type);
                 if let Err(e) = fw_page.as_mut() {
@@ -195,8 +192,8 @@ fn user_agrees(question: impl Display) -> bool {
 
 fn imdb_scraping_thread(
     exported_pages: &Arc<Mutex<Vec<RatedPage>>>,
-    pages_count: u8,
-    imdb_client: Arc<Client>,
+    pages_count: u16,
+    imdb_client: Arc<IMDb>,
 ) -> (JoinHandle<()>, Arc<Mutex<Sender<RatedPage>>>) {
     let (tx, rx) = flume::unbounded::<RatedPage>();
     let rx = Arc::new(Mutex::new(rx));
@@ -238,7 +235,7 @@ fn print_failed(pages: &Arc<Mutex<Vec<RatedPage>>>) {
     }
 }
 
-fn print_title(fw_title: &RatedTitle) {
+fn print_title<T: RatedTitle + IMDbLookup>(fw_title: &T) {
     let print_rating = || {
         if fw_title.is_favorited() {
             format!(
@@ -253,22 +250,22 @@ fn print_title(fw_title: &RatedTitle) {
         }
     };
 
-    let print_found = |imdb_id: &str, imdb_name: &str| {
+    let print_found = |imdb_id: &TitleID, imdb_name: &str| {
         let prefix = "[+]".green();
-        let title_name = fw_title.title_pl();
+        let title_name = fw_title.title();
         let title_year = fw_title.year();
         let rating = print_rating();
         let separator = "|".dimmed();
         let imdb_name = imdb_name.dimmed();
-        let imdb_title_url = format!("{}{}", "https://imdb.com/title/".dimmed(), imdb_id.dimmed());
+        let imdb_title_url = format!("{}{}", "https://imdb.com/title/".dimmed(), imdb_id.to_string().dimmed());
         println!("{prefix} {title_name} {title_year} {rating} {separator} {imdb_name} {imdb_title_url}");
     };
 
     let print_not_found = || {
-        println!("{} {} {}", "[-]".red(), fw_title.title_pl(), print_rating());
+        println!("{} {} {}", "[-]".red(), fw_title.title(), print_rating());
     };
 
     fw_title.imdb_data().map_or_else(print_not_found, |imdb_data| {
-        print_found(&imdb_data.id, &imdb_data.title);
+        print_found(&imdb_data.id, &imdb_data.title());
     });
 }
