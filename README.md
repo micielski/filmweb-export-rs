@@ -15,7 +15,7 @@
 
 # Features:
 
-- TMDB.org compatible format (IMDb v3)
+- TMDB.org, Letterboxd.com compatible format (IMDb v3)
 - Exports favorited, films, serials and marked to see
 - Multi-threaded
 - Accuracy
