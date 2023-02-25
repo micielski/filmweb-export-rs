@@ -15,7 +15,7 @@ use filmed::{IMDbLookup, RatedTitle, Title, TitleID, User};
 #[derive(Parser, Debug)]
 #[command(name = "filmweb-export")]
 #[command(author = "Remigiusz Micielski <remigiusz.micielski@gmail.com>")]
-#[command(version = "0.2.1")]
+#[command(version = "0.2.2")]
 #[command(about = "Exports user data from filmweb.pl to IMDBv3 csv file format", long_about = None)]
 struct Args {
     #[arg(short, long, value_parser)]
