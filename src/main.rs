@@ -4,7 +4,7 @@ use flume::Sender;
 use lazy_static::lazy_static;
 use std::fmt::Display;
 use std::io::{stdin, stdout, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -48,11 +48,12 @@ lazy_static! {
 
 fn main() {
     println!("{}", "filmweb-export starting...".yellow());
+    check_is_filmweb_reachable();
     env_logger::init();
 
     let mut export_files = ExportFiles::default();
     let (token, session, jwt) = handle_empty_credentials(&ARGS);
-    let user = FilmwebUser::new(token, session, jwt).unwrap();
+    let user = FilmwebUser::new(token, session, jwt).expect("credentials ok");
 
     // Get count of rated films, and convert it to number of pages
     let movies_pages = user.num_of_rated_movies() / 25 + 1;
@@ -81,10 +82,20 @@ fn main() {
     for page in &mut *exported_pages.lock().unwrap() {
         for title in &mut *page.rated_titles {
             if title.imdb_data().is_some() {
-                if title.is_duration_similar(title.imdb_data().unwrap().duration().expect("trust me") as u32) {
+                let imdb_duration = title
+                    .imdb_data()
+                    .unwrap()
+                    .duration()
+                    .expect("imdb always have a duration");
+                let imdb_year = title.imdb_data().unwrap().year();
+                // TODO: move title.is_year_similar check to library
+                if title.is_duration_similar(u32::from(imdb_duration)) && title.is_year_similar(imdb_year) {
                     title.to_csv_imdbv3_tmdb_files(&mut export_files);
                 } else {
-                    let url = format!("https://www.imdb.com/title/{}", title.imdb_data().unwrap().id);
+                    let url = format!(
+                        "https://www.imdb.com/title/{}",
+                        title.imdb_data().expect("has imdb_data").id
+                    );
                     let question = format!("{} Is {url} a good match for {}? (y/N): ", "[?]".blue(), title.title());
                     if user_agrees(question) {
                         title.to_csv_imdbv3_tmdb_files(&mut export_files);
@@ -103,27 +114,36 @@ fn main() {
 fn handle_empty_credentials(args: &ARGS) -> (String, String, String) {
     let ask_for_cookie = |cookie_name: &'static str| -> String {
         print!("{} {cookie_name} cookie value: ", "[?]".blue());
-        stdout().flush().unwrap();
+        stdout().flush().expect("term ok");
         let mut cookie = String::new();
-        stdin().read_line(&mut cookie).unwrap();
+        stdin().read_line(&mut cookie).expect("term ok");
         cookie
     };
 
-    let token = if args.token.is_none() {
-        ask_for_cookie("_fwuser_token")
-    } else {
-        args.token.as_ref().unwrap().clone()
+    let token = {
+        if let Some(ref token) = args.token {
+            token.clone()
+        } else {
+            ask_for_cookie("_fwuser_token")
+        }
     };
-    let session = if args.session.is_none() {
-        ask_for_cookie("_fwuser_sessionId")
-    } else {
-        args.session.as_ref().unwrap().clone()
+
+    let session = {
+        if let Some(ref session) = args.session {
+            session.clone()
+        } else {
+            ask_for_cookie("_fwuser_token")
+        }
     };
-    let jwt = if args.jwt.is_none() {
-        ask_for_cookie("JWT")
-    } else {
-        args.jwt.as_ref().unwrap().clone()
+
+    let jwt = {
+        if let Some(ref jwt) = args.jwt {
+            jwt.clone()
+        } else {
+            ask_for_cookie("JWT")
+        }
     };
+
     (token, session, jwt)
 }
 
@@ -139,30 +159,37 @@ fn scrape_fw(
         UserPageType::RatedShows => "serials",
         UserPageType::Watchlist => "wants2see",
     };
-    let page_type_arc = Arc::new(&titles_type);
+    let page_type = Arc::new(&titles_type);
     let error_happened = Arc::new(AtomicBool::new(false));
+    let scraped_pages_count = Arc::new(AtomicUsize::new(0));
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(ARGS.threads as usize)
         .build()?;
     pool.scope(|s| {
         for i in 1..=total_pages {
-            let page_type_clone = Arc::clone(&page_type_arc);
-            let error_happened_clone = Arc::clone(&error_happened);
+            let scraped_pages_count = scraped_pages_count.clone();
+            let page_type = Arc::clone(&page_type);
+            let error_happened = Arc::clone(&error_happened);
             s.spawn(move |_| {
-                let page_type = match *page_type_clone {
+                let page_type = match *page_type {
                     UserPageType::RatedFilms => UserPage::RatedFilms(i as u8),
                     UserPageType::RatedShows => UserPage::RatedShows(i as u8),
                     UserPageType::Watchlist => UserPage::Watchlist(i as u8),
                 };
                 let mut fw_page = user.scrape(page_type);
                 if let Err(e) = fw_page.as_mut() {
-                    eprintln!("{} {e}", "error occured: ".red());
-                    error_happened_clone.store(false, Ordering::Relaxed);
+                    eprintln!("{} {e}", "error occured:".red());
+                    error_happened.store(false, Ordering::Relaxed);
                     std::process::exit(1);
                 };
                 tx.lock().unwrap().send(fw_page.unwrap()).unwrap();
-                println!("{} Scraping {what}... [{i}/{total_pages}]", "[i]".blue());
-                stdout().flush().unwrap();
+                scraped_pages_count.store(scraped_pages_count.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+                println!(
+                    "{} Scraping {what}... [{}/{total_pages}]",
+                    "[i]".blue(),
+                    scraped_pages_count.load(Ordering::Relaxed)
+                );
+                stdout().flush().expect("term ok");
             });
         }
     });
@@ -177,9 +204,9 @@ fn scrape_fw(
 fn user_agrees(question: impl Display) -> bool {
     loop {
         print!("{question}");
-        std::io::stdout().flush().expect("can flush");
+        std::io::stdout().flush().expect("term ok");
         let mut decision = String::new();
-        stdin().read_line(&mut decision).expect("can read line");
+        stdin().read_line(&mut decision).expect("term ok");
         decision = decision.trim().to_lowercase();
         if decision == "y" || decision == "yes" {
             return true;
@@ -251,14 +278,14 @@ fn print_title<T: RatedTitle + IMDbLookup>(fw_title: &T) {
     };
 
     let print_found = |imdb_id: &TitleID, imdb_name: &str| {
-        let prefix = "[+]".green();
+        let add_prefix = "[+]".green();
         let title_name = fw_title.title();
         let title_year = fw_title.year();
         let rating = print_rating();
         let separator = "|".dimmed();
         let imdb_name = imdb_name.dimmed();
         let imdb_title_url = format!("{}{}", "https://imdb.com/title/".dimmed(), imdb_id.to_string().dimmed());
-        println!("{prefix} {title_name} {title_year} {rating} {separator} {imdb_name} {imdb_title_url}");
+        println!("{add_prefix} {title_name} {title_year} {rating} {separator} {imdb_name} {imdb_title_url}");
     };
 
     let print_not_found = || {
@@ -266,6 +293,27 @@ fn print_title<T: RatedTitle + IMDbLookup>(fw_title: &T) {
     };
 
     fw_title.imdb_data().map_or_else(print_not_found, |imdb_data| {
-        print_found(&imdb_data.id, &imdb_data.title());
+        print_found(&imdb_data.id, imdb_data.title());
     });
+}
+
+fn check_is_filmweb_reachable() {
+    let prefix = "[!]".red();
+    match reqwest::blocking::get("https://www.filmweb.pl") {
+        Ok(res) => {
+            if res.status().is_success() {
+                return;
+            } else if res.status().is_server_error() {
+                println!(
+                    "{prefix} Filmweb's servers are experiencing some issues, try again later. Status: {:?}",
+                    res.status()
+                );
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            println!("{prefix} Couldn't connect to Filmweb. Error: {:?}", e);
+            std::process::exit(1);
+        }
+    };
 }

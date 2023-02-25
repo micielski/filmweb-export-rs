@@ -394,7 +394,7 @@ dependencies = [
 [[package]]
 name = "filmed"
 version = "0.1.0"
-source = "git+https://github.com/micielski/filmweb-api-rs#01529c0ccdef5cfded32928a9c02a1de5bcbd104"
+source = "git+https://github.com/micielski/filmweb-api-rs#14fba931e0f4aaa639d3c85e4c8df3b4aae94bee"
 dependencies = [
  "csv",
  "fastrand",
@@ -1343,9 +1343,9 @@ checksum = "dc375e1527247fe1a97d8b7156678dfe7c1af2fc075c9a4db3690ecd2a148068"
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.50"
+version = "1.0.51"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ef7d57beacfaf2d8aee5937dab7b7f28de3cb8b1828479bb5de2a7106f2bae2"
+checksum = "5d727cae5b39d21da60fa540906919ad737832fe0b1c165da3a34d6548c849d6"
 dependencies = [
  "unicode-ident",
 ]
@@ -1742,9 +1742,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.91"
+version = "1.0.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877c235533714907a8c2464236f5c4b2a17262ef1bd71f38f35ea592c8da6883"
+checksum = "7434af0dc1cbd59268aa98b4c22c131c0584d2232f6fb166efb993e2832e896a"
 dependencies = [
  "itoa 1.0.5",
  "ryu",
