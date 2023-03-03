@@ -132,7 +132,7 @@ fn handle_empty_credentials(args: &ARGS) -> (String, String, String) {
         if let Some(ref session) = args.session {
             session.clone()
         } else {
-            ask_for_cookie("_fwuser_token")
+            ask_for_cookie("_fwuser_sessionId")
         }
     };
 
