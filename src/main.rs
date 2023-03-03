@@ -117,7 +117,7 @@ fn handle_empty_credentials(args: &ARGS) -> (String, String, String) {
         stdout().flush().expect("term ok");
         let mut cookie = String::new();
         stdin().read_line(&mut cookie).expect("term ok");
-        cookie
+        cookie.trim().to_string()
     };
 
     let token = {
