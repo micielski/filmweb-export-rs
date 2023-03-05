@@ -66,7 +66,7 @@ Options:
   ```
     
   #### --threads <THREADS> 
-  It may be useful if your internet connection or computer at this time is poor in resources. In that case, try lowering the threads count.  
+  It may be useful if your internet connection or computer at this time is poor in resources. In that case, try lowering the thread count.  
   Please note that the default value is high enough. Going above that, will hurt your exporting performance, and even cause some movies to not export!
   
   ```
