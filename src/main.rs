@@ -302,7 +302,6 @@ fn check_is_filmweb_reachable() {
     match reqwest::blocking::get("https://www.filmweb.pl") {
         Ok(res) => {
             if res.status().is_success() {
-                return;
             } else if res.status().is_server_error() {
                 println!(
                     "{prefix} Filmweb's servers are experiencing some issues, try again later. Status: {:?}",
